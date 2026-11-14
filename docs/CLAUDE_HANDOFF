@@ -1,0 +1,81 @@
+# NAZIR — CLAUDE CODE HANDOFF
+
+> 버전 1.0 · Claude Code 전달 및 실행 지침
+
+## 1. 프로젝트/역할
+NAZIR은 뮤지컬/연극 티켓 예매 웹사이트다. 사용자는 기획과 제품 의사결정을 맡고, Claude Code는 저장소 조사·기술 검토·구현·테스트·디버깅을 맡는다. 목표 공개일은 2026-11-30이나 안전성 게이트를 통과하지 못하면 실제 판매를 연기한다.
+
+NAZIR 전용 신규 GitHub 저장소를 사용한다. 기존 Preview AI 저장소와 혼동하거나 재사용하지 않는다.
+
+## 2. 반드시 읽을 문서
+1. `DATABASE.md`
+2. `API_SPEC.md`
+3. `ARCHITECTURE.md`
+4. `IMPLEMENTATION_PLAN.md`
+5. `TEST_PLAN.md`
+6. 본 문서
+
+## 3. 첫 작업: 독립 기술 검토
+코드 구현 전에 문서 전체를 읽고 DB/API/아키텍처/테스트 간 모순, Prisma/PostgreSQL 구현 가능성, 동시성/결제/환불/접근 보안 위험을 검토한다.
+
+보고서 분류:
+- BLOCKER: 구현 전에 반드시 수정/결정
+- HIGH: P0 개발 중 해결
+- MEDIUM: 공개 전 해결
+- LOW: 후속 개선
+
+각 항목에는 근거, 재현 시나리오, 권장 해결책, 영향 문서를 적는다. 검토 후 사용자에게 요약하고 승인받은 뒤 대규모 구현을 시작한다.
+
+## 4. 특별히 검증할 DB 위험
+- `seat_holds.order_id`와 `order_items.order_id` 소속 일치
+- `session_seats`가 회차 공연장에 속한 좌석인지
+- 한 주문의 모든 항목이 같은 회차인지
+- 변경 가능한 `order_items`와 과거 좌석을 보존하는 `seat_holds`의 이력 정합성
+- 좌석 변경 실패 시 기존 hold rollback
+- 주문별 정상 승인 결제 1건과 중복 승인 이력 보존
+- PG 승인과 좌석 만료/재판매 경합
+- 환불 누적액 동시성 및 외부 환불 후 DB 기록 실패 복구
+- 접근 세션 재발급, CSRF, session fixation 방어
+- PostgreSQL partial unique/check/복합 제약의 migration
+
+## 5. 기술 방향
+Next.js + TypeScript + React, PostgreSQL, Prisma + 필요한 raw SQL migration, 모듈형 모놀리스, DB Source of Truth, Outbox 기반 Sheets mirror, PG/본인인증 provider adapter.
+
+호스팅/PG/인증사 미확정 항목은 공식 자료와 계약 상태를 확인해 결정한다. 업체가 미정이면 mock adapter만 구현하고 production flow는 비활성화한다.
+
+## 6. 작업 프로토콜
+`Inspect → Plan → Implement → Test → Review → Report → Document`
+
+작업 전 변경 범위, 영향, 위험, 테스트 계획을 제시한다. 작업 후 변경 파일, 실행 명령/결과, 실패/미실행 테스트, migration 영향, 보안/동시성 영향, 남은 위험을 보고한다. 테스트를 약화하거나 실패를 숨기지 않는다.
+
+## 7. 절대 금지
+- 브라우저 redirect만으로 결제 성공 확정
+- 클라이언트 금액/좌석 상태 신뢰
+- 클라이언트 timer로 hold 만료 판정
+- UNKNOWN에서 PG 조회 전 재결제 허용
+- DB 직접 수정으로 운영 복구
+- SQLite로 PostgreSQL 동시성 테스트 대체
+- Sheets를 정본으로 사용
+- 로그에 토큰/카드정보/불필요한 개인정보 저장
+- P0 실패를 무시하고 공개
+
+## 8. 실행 순서
+1. 문서/저장소 조사 및 독립 검토
+2. 신규 저장소와 프로젝트 기반
+3. PostgreSQL schema/migration
+4. 공연/회차/좌석 조회
+5. 주문/점유/접근 세션/Idempotency
+6. 예매자 정보/본인인증
+7. 결제/Webhook/티켓
+8. 예매 확인/조회
+9. 관리자
+10. Sheets Outbox
+11. 통합 테스트/보안/배포
+
+각 단계의 완료 기준은 `IMPLEMENTATION_PLAN.md`, 안전성 테스트는 `TEST_PLAN.md`를 따른다.
+
+## 9. 미결정 사항
+PG사, 본인인증사, 실제 좌석 SVG, 공연장, 가격/할인, 환불 정책, 개인정보 보관기간, 구매 제한, Sheets 운영 컬럼, SMS 공급사는 추정하지 않는다. `DECISIONS.md`에 질문/선택지/영향/결정 담당/기한/상태를 기록한다.
+
+## 10. 첫 보고 요청
+첫 보고는 코드 변경보다 검토 결과를 우선한다. 문서 모순, DB 구현 위험, 공개를 막을 외부 의존성, 일정 위험, 우선 해결할 BLOCKER 최대 5개, 다음 실행 제안을 포함한다.
