@@ -1,0 +1,96 @@
+# NAZIR — SYSTEM ARCHITECTURE
+
+> 버전 1.0 · 개발 전달 기준안
+
+## 1. 목표와 품질 속성
+NAZIR은 뮤지컬/연극 예매 중심 웹사이트다. 초기에는 제한된 공연/회차를 안정적으로 판매한다. 핵심 품질 속성은 좌석 중복 판매 방지, PG 서버 검증, 이력 추적, 외부 장애 격리, 빠른 MVP 및 QR 확장성이다.
+
+## 2. 기술 결정
+
+| 영역 | 기술/방향 | 비고 |
+|---|---|---|
+| Web/API | Next.js + TypeScript + React | 관객/관리자/API |
+| DB | PostgreSQL | Source of Truth |
+| ORM | Prisma | 일반 CRUD |
+| 고급 DB | PostgreSQL SQL migration | partial index/lock |
+| 배포 | Vercel 우선 검토 | 상품 제약 확인 후 확정 |
+| DB 호스팅 | 관리형 PostgreSQL | 업체 미선정 |
+| 소스 | 신규 NAZIR GitHub | Preview AI 저장소와 분리 |
+| 파일 | 객체 저장소 또는 정적 asset | 포스터/SVG |
+| 작업 | Cron/Scheduled Job | Outbox 및 후처리 |
+| 운영 mirror | Google Sheets | 비동기 |
+
+버전과 호스팅 상품은 개발 시작 시 공식 지원 및 연결 제약을 확인하고 고정한다.
+
+## 3. 모듈형 모놀리스
+
+```mermaid
+flowchart TD
+  U[관객 브라우저] --> APP[Next.js Application]
+  A[관리자 브라우저] --> APP
+  APP --> C[Catalog]
+  APP --> B[Booking]
+  APP --> I[Identity Adapter]
+  APP --> P[Payment Adapter]
+  APP --> O[Admin Operations]
+  C --> DB[(PostgreSQL)]
+  B --> DB
+  I --> DB
+  P --> DB
+  O --> DB
+  DB --> W[Outbox Worker]
+  W --> S[Google Sheets]
+  P <--> PG[PG]
+  I <--> IDP[본인인증사]
+```
+
+도메인 모듈: `catalog`, `booking`, `identity`, `payments`, `refunds`, `tickets`, `admin`, `integrations`. 초기에는 마이크로서비스로 분리하지 않는다. 다른 모듈의 데이터를 임의로 수정하지 않고 도메인 서비스/use case 경계를 통해 변경한다.
+
+## 4. 정상 예매 데이터 흐름
+1. 관객이 공연/회차/좌석을 조회한다.
+2. 서버가 DB 기반 좌석 상태와 가격을 반환한다.
+3. 다음 단계 진입 시 서버가 좌석을 잠그고 전체 점유 가능성을 확인한다.
+4. 성공하면 주문, 주문 항목, 7분 hold, 접근 세션을 원자 생성한다.
+5. 예매자 정보 입력 후 휴대폰 본인인증.
+6. 인증사 서버 검증 후 번호 확정.
+7. 서버가 DB 주문 금액으로 PG 결제 요청.
+8. Webhook 및 PG 서버 조회로 승인 확인.
+9. DB 트랜잭션에서 주문/좌석/결제/티켓/로그/outbox 확정.
+10. 모바일 예매 확인서를 제공한다.
+
+## 5. 점유 만료 및 결제 UNKNOWN
+- 만료 기준은 `seat_holds.expires_at`; 브라우저 timer는 표시 전용.
+- 새 점유 시 서버가 만료된 ACTIVE hold를 직접 정리한다.
+- 결제 결과 UNKNOWN이면 hold 만료만으로 주문을 종료하지 않고 PAYMENT_PENDING 상태를 유지한다.
+- PG 거래를 재조회한 뒤 좌석을 다시 검증한다.
+- 재확보 불가 시 자동 발권하지 않고 REVIEW_REQUIRED로 전환한다.
+
+## 6. 외부 연동
+PG/본인인증은 provider adapter로 격리한다. 외부 응답의 중복·지연·순서 역전·timeout을 정상적인 예외로 처리한다. PG 네트워크 요청을 장시간 DB transaction 안에서 수행하지 않는다. 핵심 DB 변경과 outbox 이벤트는 같은 transaction, Sheets 전송은 비동기다.
+
+## 7. 트랜잭션/동시성 경계
+트랜잭션 필수: 다중 좌석 점유, 좌석 변경, 관리자 차단/해제, 결제 승인 후 판매/티켓 확정, 환불 완료 후 티켓 무효화/좌석 처리, 핵심 변경과 로그/outbox 생성.
+- 좌석 잠금은 정렬된 ID 순서.
+- partial unique index로 ACTIVE hold 중복 방어.
+- 결제 확정 시 주문/좌석 상태 재검증.
+- 환불 누적액은 관련 행 잠금.
+- 실제 PostgreSQL에서 동시성 테스트.
+
+## 8. 환경/배포
+`local`, `test/staging`, `production`을 분리하고 서로 다른 DB/credential 사용. 운영 secret은 secret manager. migration은 배포 전 검증. Vercel/DB 조합의 connection pooling, serverless connection, timeout, region latency를 확인한다. 운영 배포 전 백업/복구 리허설.
+
+## 9. 보안/관측/복구
+- HTTPS, HttpOnly/Secure cookie, CSRF, XSS, SQL injection, rate limit 대응.
+- PG Webhook signature 및 replay 방어.
+- 로그에 전화번호/토큰/카드정보 저장 금지.
+- correlation ID, 주문번호, PG 거래 ID, webhook ID, outbox ID 중심의 추적.
+- REVIEW_REQUIRED, UNKNOWN 장기화, Webhook 실패, Outbox DEAD, DB 오류 알림.
+- DB 직접 수정 금지. 관리자 복구 기능과 감사 로그 사용.
+
+## 10. 단계 범위
+- Phase 1: 공연/회차/좌석, 점유, 비회원 주문, 본인인증, PG, Webhook, 모바일 확인서, 조회, 최소 관리자, 수동 환불 기록, Sheets mirror.
+- Phase 2: 관리자 고도화, 환불 운영, SMS 자동 발송, QR 티켓 관리.
+- Phase 3: QR 스캔, 중복 입장 방지, 현장 예외 및 리허설.
+
+## 11. 미결정
+PG사, 인증사, DB/호스팅 상품, 공연장/좌석 SVG, 파일 저장소, SMS 공급사, 개인정보 보관기간, 환불/재판매 정책은 임의 확정하지 않는다.
