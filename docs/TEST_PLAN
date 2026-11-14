@@ -1,0 +1,142 @@
+# NAZIR — TEST PLAN
+
+> 버전 1.0 · 목적: 좌석/금전/개인정보 무결성 검증 및 공개 Go/No-Go
+
+## 1. 전략 및 환경
+P0는 실제 판매 전 필수, P1은 공개 운영 필수, P2는 후속 개선. Unit, Integration, Concurrency, E2E, Security, Resilience 테스트를 수행한다.
+- PostgreSQL 동시성/partial index는 실제 PostgreSQL에서 검증. SQLite 대체 금지.
+- PG/인증은 sandbox 또는 mock adapter.
+- 개발/테스트/운영 DB 분리.
+- 전용 fixture 사용, 테스트 시간은 주입 가능한 clock으로 제어.
+- 실제 개인정보/카드정보를 로그에 남기지 않는다.
+
+## 2. P0 좌석/점유
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| SEAT-01 | 동일 좌석 동시 점유 | 한 요청만 성공 |
+| SEAT-02 | 다중 좌석 중 하나 확보 불가 | 전체 rollback, 부분 점유 없음 |
+| SEAT-03 | 만료 hold 후 새 점유 | 만료 처리 후 새 점유 성공 |
+| SEAT-04 | 유효 ACTIVE hold 재점유 | 거부 |
+| SEAT-05 | A→B 변경 | A RELEASED, B ACTIVE |
+| SEAT-06 | A→B 변경 실패 | A 기존 점유 유지 |
+| SEAT-07 | A→B→A | unique 충돌 없이 성공 |
+| SEAT-08 | 차단과 점유 동시 실행 | 한 작업만 성공, 일관성 유지 |
+| SEAT-09 | SOLD 좌석 차단 | 거부 |
+| SEAT-10 | 브라우저 timer 조작 | 서버 만료시각 불변 |
+| SEAT-11 | 다중 좌석 잠금 | deadlock 방지/안전 재시도 |
+| SEAT-12 | Cron 지연 | 새 점유 시 서버가 만료 hold 직접 정리 |
+
+## 3. P0 주문/세션/Idempotency
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| ORD-01 | 정상 주문 | 주문/항목/hold/접근 세션 생성 |
+| ORD-02 | 같은 key/같은 본문 재요청 | 주문 중복 없음 |
+| ORD-03 | 같은 key/다른 본문 | 409 |
+| ORD-04 | 응답 유실 후 재요청 | 기존 주문, 접근 쿠키 재발급 |
+| ORD-05 | 접근 쿠키 없이 상세 접근 | 거부 |
+| ORD-06 | 다른 주문 쿠키 사용 | 거부 |
+| ORD-07 | 폐기/만료 세션 사용 | 거부 |
+| ORD-08 | 주문번호만 알고 조회 | 거부 |
+| ORD-09 | hold/order item 소속 불일치 | DB/service에서 차단 |
+| ORD-10 | 결제 전 hold 만료 | 주문 EXPIRED |
+
+## 4. P0 본인인증/개인정보
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| IDV-01 | 정상 인증 | 번호 확정 |
+| IDV-02 | 실패/취소 | customer_phone 미확정 |
+| IDV-03 | 입력 번호와 인증 번호 불일치 | 실패, 번호 미확정 |
+| IDV-04 | 다른 주문 인증 ID 사용 | 거부 |
+| IDV-05 | 클라이언트 성공 위조 | 서버 검증 실패 |
+| IDV-06 | 만료 인증 결과 재사용 | 거부 |
+| IDV-07 | 조회 세션 사용 | 인증 번호의 주문만 반환 |
+| IDV-08 | 조회 세션 없이 lookup | 401 |
+| IDV-09 | 인증/조회 반복 시도 | rate limit |
+| IDV-10 | 로그 검사 | 전화번호/토큰 마스킹 |
+
+## 5. P0 결제/Webhook/티켓
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| PAY-01 | 정상 결제 | PG 확인 후 PAID/SOLD/ticket |
+| PAY-02 | 브라우저 redirect만 성공 | 확정되지 않음 |
+| PAY-03 | PG timeout | UNKNOWN/확인 대기, 재결제 차단 |
+| PAY-04 | 동일 결제 key 재요청 | 결제 중복 생성 없음 |
+| PAY-05 | UNKNOWN에서 재결제 | PG 조회 전 차단 |
+| PAY-06 | Webhook 반복 | 중복 확정/티켓 없음 |
+| PAY-07 | Webhook 순서 역전 | PG 재조회 기준 반영 |
+| PAY-08 | 위조 signature | 상태 변경 없음 |
+| PAY-09 | event ID 없는 Webhook | provider dedupe key 적용 |
+| PAY-10 | 승인 금액 불일치 | 발권 금지, REVIEW_REQUIRED |
+| PAY-11 | 중복 승인 | 이력 보존, 중복 예매 확정 금지 |
+| PAY-12 | hold 만료와 승인 동시 도착 | 중복 판매/발권 없음 |
+| PAY-13 | 좌석이 이미 타인에게 판매 | REVIEW_REQUIRED |
+| PAY-14 | 티켓 생성 transaction 재시도 | order item당 한 장 |
+| PAY-15 | 결제 실패, hold 유효 | 정책에 따른 재시도, 점유 유지 |
+| PAY-16 | 결제 실패, hold 만료 | 주문 종료 |
+
+## 6. P1 환불/관리자
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| REF-01 | 전액 환불 | PG 검증 후 ticket VOID, order REFUNDED |
+| REF-02 | 부분 환불 | 해당 항목만 환불, 주문 PAID 유지 |
+| REF-03 | refund item 합계 불일치 | 완료 거부 |
+| REF-04 | 누적 환불액이 결제액 초과 | 거부 |
+| REF-05 | 동시 환불 | 잠금으로 초과 환불 방지 |
+| REF-06 | PG 환불 실패 | 좌석 SOLD/티켓 유지 |
+| REF-07 | PG 환불 성공 후 DB 기록 실패 | PG 재조회로 멱등 복구 |
+| ADM-01 | 비로그인 관리자 API | 401 |
+| ADM-02 | 비활성 관리자 로그인 | 거부 |
+| ADM-03 | 반복 로그인 실패 | rate limit |
+| ADM-04 | 좌석 차단/해제 | 상태 변경 및 audit log |
+| ADM-05 | hold/SOLD 좌석 차단 | 거부 |
+| ADM-06 | 운영 복구 | 허용된 작업 및 감사 로그 |
+| ADM-07 | DB 직접 수정 없는 복구 | 관리자 흐름으로 완료 |
+
+## 7. P1 Outbox/Sheets
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| OUT-01 | 핵심 변경과 outbox 생성 | 같은 DB transaction |
+| OUT-02 | Sheets 장애 | 주문/결제 성공 유지 |
+| OUT-03 | 이벤트 재전송 | 중복 row 없음 |
+| OUT-04 | worker 동시 claim | 한 worker만 lease |
+| OUT-05 | worker crash | lease 만료 후 재시도 |
+| OUT-06 | 일시 실패 | backoff 재시도 |
+| OUT-07 | 최대 재시도 초과 | DEAD 및 운영자 확인 |
+| OUT-08 | Sheets 메모 편집 | 허용 필드만 반영 |
+
+## 8. E2E 필수 흐름
+1. 공연 → 회차 → 좌석 → 주문.
+2. 예매자 정보 → 본인인증 → PG sandbox.
+3. PG server verification/Webhook → PAID → SOLD → ticket.
+4. 예매 확인서 및 휴대폰 인증 주문 조회.
+5. 동일 좌석 경합.
+6. 결제 중 브라우저 종료 및 UNKNOWN 복구.
+7. 7분 만료 직전/직후 결제 승인 경합.
+8. 관리자 REVIEW_REQUIRED 조회 및 복구.
+
+## 9. 보안 체크리스트
+- [ ] 주문번호만으로 주문 접근 불가
+- [ ] 접근 토큰 원문 DB/로그 저장 금지
+- [ ] 쿠키 기반 API CSRF 방어
+- [ ] XSS/SQL injection 방어
+- [ ] 관리자 권한 서버 검증
+- [ ] 로그인/인증/조회 rate limit
+- [ ] PG Webhook signature 및 replay 검증
+- [ ] secret 미커밋
+- [ ] 전화번호/토큰/카드정보 로그 마스킹
+- [ ] CORS allowlist, HTTPS, Secure cookie
+- [ ] 백업/복구 권한 통제
+
+## 10. Go / No-Go
+
+**Go:** P0 전부 통과, 좌석 중복 판매 방지 검증, PG server-side verification, UNKNOWN/중복 Webhook/중복 승인 복구, 주문 조회 보안, 실제 PG/인증 환경 검증, 운영자 리허설 및 백업/복구 확인, 중대한 보안 이슈 없음.
+
+**No-Go:** P0 하나라도 실패, PG/인증 실환경 검증 미완료, UNKNOWN/좌석 경합 미검증, 개인정보 노출/인증 우회, 운영 복구 체계 미준비.
+
+목표 공개일보다 안전한 판매가 우선이다.
