@@ -1,0 +1,291 @@
+# NAZIR — TEST PLAN
+
+> 문서 버전: 1.1 · 기준일: 2026-11-14 · 목적: 좌석·금전·구매 한도·개인정보 무결성 검증 및 공개 Go/No-Go
+> 관련 문서: `DATABASE.md`, `API_SPEC.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`, `DECISIONS.md`
+> 이전 버전 원문: `docs/archive/v1.0/TEST_PLAN`
+
+## 1. 전략 및 환경
+
+등급: P0는 실제 판매 전 필수, P1은 공개 운영 필수(수동 대체 시 사용자 승인으로 예외 가능), P2는 후속(`IMPLEMENTATION_PLAN.md` §2).
+
+종류: Unit, Integration, Concurrency, Schema Contract, E2E, Security, Resilience, Load.
+
+- PostgreSQL 동시성·partial index·CHECK·복합 FK는 **실제 PostgreSQL**에서 검증. SQLite 대체 금지.
+- PG/인증은 mock adapter(장애 주입 포함, ARCHITECTURE §6.3) 후 실제 sandbox.
+- 개발/테스트/운영 DB 분리, 전용 fixture.
+- 시간은 Clock 인터페이스로 주입(7분·3분·재조회 백오프·세션 TTL 검증).
+- 동시성 테스트는 실제 병렬 커넥션으로 수행하고, 경합 지점에 barrier/지연 주입을 사용한다.
+- 실제 개인정보·카드정보를 로그에 남기지 않는다.
+- 각 테스트는 기대 결과와 함께 **DB 불변식**(아래 §1.1)을 사후 검사한다.
+
+### 1.1 공통 사후 불변식
+
+| ID | 불변식 |
+|---|---|
+| INV-1 | 좌석당 `ACTIVE`/`CONFIRMING` hold ≤ 1 |
+| INV-2 | 좌석당 유효 티켓(`ISSUED`/`USED`) ≤ 1, `SOLD` ⇔ `sold_order_item_id` 존재 |
+| INV-3 | `purchase_quotas.counted_seats` = 규칙상 파생 값, ≤ `seat_limit`(≤ 4) |
+| INV-4 | (주체, 회차)당 활성 주문 ≤ 1 |
+| INV-5 | 주문당 진행 중 결제 ≤ 1, `PAID` 주문은 `confirmed_payment_id` 보유 |
+| INV-6 | 결제별 `refunded_amount` ≤ `approved_amount` |
+| INV-7 | hold·항목·티켓·환불 항목의 주문·좌석·회차 소속 일치 |
+| INV-8 | `order_items` 생성 후 변경 없음 |
+
+## 2. P0 스키마 계약 / Migration
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| MIG-01 | 빈 PostgreSQL에 `migrate deploy` | 성공 |
+| MIG-02 | 필수 partial unique 존재 검사(`seat_holds`, `orders` 활성, `payments` 진행 중, `tickets` 유효, `review_cases` open) | 모두 존재, predicate 일치 |
+| MIG-03 | 필수 CHECK 존재 검사(quota, 결제 금액·환불, SOLD 소유, 수단, 상태값) | 모두 존재 |
+| MIG-04 | 필수 복합 FK 존재 검사(DATABASE §14) | 모두 존재 |
+| MIG-05 | `seats` NULLS NOT DISTINCT unique | 구역/열 NULL 좌석 중복 삽입 거부 |
+| MIG-06 | 이후 migration 생성 시 raw SQL 객체 DROP 여부 | DROP 문 없음(CI 검사) |
+| MIG-07 | 타입 검사: 시각 컬럼 `timestamptz`, 금액 `bigint` | 일치 |
+| MIG-08 | 소속 불일치 직접 삽입(다른 회차 좌석 항목, 다른 공연장 좌석의 회차 좌석, 다른 주문 hold) | FK 위반으로 거부 |
+
+## 3. P0 좌석/점유
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| SEAT-01 | 서로 다른 주체가 동일 좌석 동시 점유 | 한 요청만 성공, 나머지 409 `SEAT_UNAVAILABLE` |
+| SEAT-02 | 다중 좌석 중 하나 확보 불가 | 전체 rollback, 부분 점유 없음, 한도 카운터 불변 |
+| SEAT-03 | 만료 hold 좌석에 새 점유 | 사전 정리 `expireOrder` 후 성공, 이전 주문 `EXPIRED`·한도 복구 |
+| SEAT-04 | 유효 `ACTIVE` hold 좌석 재점유 | 거부 |
+| SEAT-05 | `CONFIRMING` hold 좌석(7분 경과)에 새 점유 | 거부(펜싱), 기존 주문 불변 |
+| SEAT-06 | `UNKNOWN` 결제 주문의 좌석에 새 점유 | 거부(재판매 금지) |
+| SEAT-07 | 차단과 점유 동시 실행 | 한 작업만 성공, 일관성 유지 |
+| SEAT-08 | SOLD 좌석 차단 | 거부 |
+| SEAT-09 | 만료됐으나 미정리된 `ACTIVE` hold 좌석 차단 | 409 후 정리 뒤 재시도 성공, 차단 트랜잭션이 다른 주문 hold를 바꾸지 않음 |
+| SEAT-10 | 브라우저 timer 조작 | 서버 만료시각 불변 |
+| SEAT-11 | 다중 좌석 역순 요청 동시 실행 | 정렬 잠금으로 deadlock 없음, 발생 시 안전 재시도 |
+| SEAT-12 | 만료 작업 지연 | 주문 생성 경로가 직접 정리 |
+| SEAT-13 | 다른 회차의 좌석 ID를 섞어 요청 | 400/409, 점유 없음 |
+| SEAT-14 | 결제 실패·재시도로 7분 연장 시도 | `hold_expires_at` 불변 |
+
+v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌석 변경 제거 [확정 D-001]에 따라 삭제하고 ORD-11~14(취소 후 재예매)로 대체했다.
+
+## 4. P0 주문/세션/Idempotency
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| ORD-01 | 정상 주문 | 주문·항목·hold·접근 세션 생성, 한도 +n, `hold_expires_at = now + 7분` |
+| ORD-02 | 같은 주체·같은 key·같은 본문 재요청 | 주문 중복 없음, 같은 응답 |
+| ORD-03 | 같은 주체·같은 key·다른 본문 | 409 `IDEMPOTENCY_KEY_REUSED` |
+| ORD-04 | 응답 유실 후 같은 브라우저 재요청 | 기존 주문, 접근 쿠키 재설정 |
+| ORD-05 | **다른 브라우저/다른 주체가 같은 key·같은 본문 재요청** | 피해자 주문·쿠키 반환 없음(별개 요청 처리) |
+| ORD-06 | 같은 key 동시 2요청 | 한 요청만 처리, 나머지 결과 재반환 또는 409 `REQUEST_IN_PROGRESS` |
+| ORD-07 | PROCESSING lease 만료 후 재요청 | 재처리, 중복 주문 없음 |
+| ORD-08 | 인증 세션 없이 주문 생성·상세 접근 | 401 |
+| ORD-09 | 다른 주체의 주문 접근 | 403/404 |
+| ORD-10 | 폐기·만료된 세션/접근 세션 사용 | 거부 |
+| ORD-11 | 주문번호만 알고 조회 | 거부 |
+| ORD-12 | `PENDING` 주문 취소 | `CANCELED`, hold `RELEASED`, READY 결제 `CANCELED`, 한도 −n |
+| ORD-13 | 취소 후 다른 좌석으로 재예매 | 새 주문 생성, 이전 주문·결제·hold 이력 보존·비참조 |
+| ORD-14 | `PAYMENT_CONFIRMING`/`PAYMENT_UNKNOWN` 주문 취소 | 409 `PAYMENT_IN_PROGRESS` |
+| ORD-15 | 결제 전 hold 만료 | 주문 `EXPIRED`, 한도 복구 |
+| ORD-16 | 좌석 변경 API 호출 시도(`PATCH /orders/{id}/seats`) | 404(미제공) |
+| ORD-17 | `order_items` UPDATE 시도(DB 직접) | 차단 또는 계약 테스트에서 탐지 |
+| ORD-18 | 판매 기간 외·회차 PAUSED/CLOSED/CANCELED·시작 후 주문 | 422 `SALES_NOT_OPEN` |
+| ORD-19 | 결제 진행 중 이메일 변경 | 409 |
+| ORD-20 | 이름·전화번호 변경 요청 | 불가(필드 미제공) |
+
+## 5. P0 구매 한도/활성 주문 [확정 D-006, D-008]
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| QTA-01 | 한 주문 4석 | 성공 |
+| QTA-02 | 한 주문 5석 | 422 `PURCHASE_LIMIT_EXCEEDED` |
+| QTA-03 | 2석 결제 완료 후 같은 회차 2석 추가 주문 | 성공(`PAID`는 비활성 주문, 한도 4 도달) |
+| QTA-04 | 위 상태에서 1석 추가 | 422 |
+| QTA-05 | 같은 주체가 같은 회차에 활성 주문 보유 중 새 주문 | 409 `ACTIVE_ORDER_EXISTS` |
+| QTA-06 | 같은 주체가 **다른 브라우저 두 곳에서 동시에** 같은 회차 주문 | 한 요청만 성공, 한도·활성 주문 불변식 유지 |
+| QTA-07 | 같은 주체 동시 요청 3석 + 2석 | 한 요청만 성공 |
+| QTA-08 | 같은 주체, 다른 회차 동시 주문 | 각각 성공(회차별 독립) |
+| QTA-09 | 만료된 점유는 한도에서 제외 | 만료 후 새 주문 4석 가능 |
+| QTA-10 | 취소·결제 실패로 해제된 좌석은 제외 | 즉시 새 주문 가능 |
+| QTA-11 | `CONFIRMING`·`UNKNOWN` 좌석은 포함 | 추가 주문 시 한도 계산에 포함, 활성 주문으로 409 |
+| QTA-12 | 환불 `REQUESTED`/`VERIFYING` 좌석은 포함 | 한도 미복구 |
+| QTA-13 | 환불 `COMPLETED`(좌석 해제) | 해당 좌석 수만큼 한도 복구 |
+| QTA-14 | 4석 중 1석 부분 환불 완료 | 1석만 복구, 주문 `PAID` 유지 |
+| QTA-15 | 환불 `FAILED` | 한도 미복구 |
+| QTA-16 | 서로 다른 전화번호로 인증했지만 같은 동일인 식별값(DI 등) | 같은 subject로 합산 |
+| QTA-17 | quota 카운터 강제 불일치(fixture) | 정합성 검사가 `QUOTA_MISMATCH` review case 생성, 자동 덮어쓰기 없음 |
+| QTA-18 | `counted_seats`가 `seat_limit`를 넘는 UPDATE 직접 시도 | CHECK 위반 |
+| QTA-19 | 활성 주문 partial unique 직접 위반 시도 | unique 위반 |
+
+## 6. P0 본인인증/개인정보 [확정 D-004]
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| IDV-01 | 정상 인증 → claim | BOOKING 세션 발급, 인증 `CONSUMED`, 만료 30분(설정값) |
+| IDV-02 | 인증 실패·취소 | 세션 미발급 |
+| IDV-03 | 인증 없이 좌석 점유·주문 시도 | 401 `IDENTITY_SESSION_REQUIRED` |
+| IDV-04 | **다른 브라우저에서 claim** | 거부(바인딩 불일치) |
+| IDV-05 | **세션 쿠키를 다른 브라우저로 복사해 사용** | 401 `BROWSER_BINDING_MISMATCH` |
+| IDV-06 | claim 재사용(같은 인증 2회) | 거부 |
+| IDV-07 | 같은 `provider_transaction_id`로 다른 인증 레코드 검증 | 거부(unique) |
+| IDV-08 | 클라이언트 성공 위조·콜백 위조(nonce 불일치) | 서버 검증 실패, 상태 불변 |
+| IDV-09 | claim 기한 경과 | 거부 |
+| IDV-10 | 세션 만료 후 진행 중 주문 접근 → 재인증 | 같은 subject로 기존 주문 이어서 진행 |
+| IDV-11 | LOOKUP 세션으로 주문 생성·결제 | 403 `SESSION_PURPOSE_MISMATCH` |
+| IDV-12 | LOOKUP 세션으로 주문 목록 | 인증 주체의 주문만 반환 |
+| IDV-13 | 세션 없이 주문 목록 | 401 |
+| IDV-14 | 인증 시작·claim 반복 | rate limit |
+| IDV-15 | 같은 브라우저에서 재인증 | 기존 같은 purpose 세션 `REVOKED`, 새 토큰 |
+| IDV-16 | 로그·DB 검사 | 동일인 식별값 원문 없음(HMAC만), 전화번호·토큰 마스킹 |
+| IDV-17 | 인증 콜백이 cross-site POST로 도착 | 쿠키 없이 처리 후 303, 결과 페이지에서 claim 성공 |
+
+## 7. P0 결제/티켓 [확정 D-003, D-005]
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| PAY-01 | 정상 결제 | Tx1 → confirm → Tx2, `PAID`/`SOLD`/티켓, `role = PRIMARY` |
+| PAY-02 | 브라우저 redirect 파라미터만 성공 | 확정되지 않음 |
+| PAY-03 | 복귀 시 hold 이미 만료 | confirm 미호출, 결제 `CANCELED`, 주문 `EXPIRED` |
+| PAY-04 | 복귀 금액 위조 | confirm 미호출, 결제 `FAILED` |
+| PAY-05 | **Tx1 커밋 직후 7분 경과 + 다른 사용자 점유 시도** | 거부(펜싱), 승인 시 정상 확정 |
+| PAY-06 | confirm 2분 후 승인 응답 | 3분 내 → `PAID` |
+| PAY-07 | confirm timeout, 3분 경과 | 결제 `UNKNOWN`, 주문 `PAYMENT_UNKNOWN`, **hold `CONFIRMING` 유지, 좌석 해제 없음, 실패 처리 없음** |
+| PAY-08 | UNKNOWN 후 재조회에서 승인 확인 | `PAID`, 티켓 1회 |
+| PAY-09 | UNKNOWN 후 재조회에서 승인 없음 확정(7분 경과) | 결제 `FAILED`, 주문 `EXPIRED`, 한도 복구 |
+| PAY-10 | 실패 확정, 7분 남음 | 주문 `PENDING`, hold `ACTIVE`, 만료시각 불변, 새 결제 시도 가능 |
+| PAY-11 | UNKNOWN 중 새 결제 시작 | 409 `PAYMENT_IN_PROGRESS` |
+| PAY-12 | 같은 결제 key 재요청 | 결제 중복 생성 없음 |
+| PAY-13 | 두 탭에서 동시 결제 시작 | 진행 중 결제 1건(기존 READY는 CANCELED) |
+| PAY-14 | CANCELED된 READY 결제로 PG 복귀 | confirm 미호출 |
+| PAY-15 | 승인 금액 불일치 | 발권 금지, 결제 `EXCESS`, 주문 `REVIEW_REQUIRED`, hold 보호 유지, review case |
+| PAY-16 | 이미 PAID 주문에 다른 결제 승인 발견 | 이력 보존, `role = EXCESS`, 주문 `PAID` 유지, review case |
+| PAY-17 | 허용 외 결제수단(가상계좌) 요청·보고 | 시작 시 422, PG 보고 시 확정 금지·review case |
+| PAY-18 | 복귀·webhook·재조회 동시 도착 | 판매 확정 1회, 티켓 항목당 1장 |
+| PAY-19 | 판매 확정 트랜잭션 재시도 | 항목당 티켓 1장 |
+| PAY-20 | confirm 호출 직후 프로세스 종료(crash 주입) | `CONFIRMING` 잔존 → 3분 후 UNKNOWN → 재조회로 해소 |
+| PAY-21 | confirm이 DB 트랜잭션 밖에서 호출되는지 | 계측으로 확인(트랜잭션 내 외부 호출 0건) |
+| PAY-22 | 남은 점유 60초 미만에서 결제 시작 | 422 `HOLD_TIME_INSUFFICIENT`(설정값) |
+| PAY-23 | UNKNOWN 10분·30분 경과 | 경보, 30분에 `PAYMENT_UNKNOWN_PROLONGED` review case |
+| PAY-24 | `expireOrder`와 Tx1 동시 실행 | 둘 중 하나만 효과, 결제 미발생 또는 정상 펜싱 |
+| PAY-25 | 결제 진행 중 판매 PAUSED 전환 | 진행 중 주문은 확정 완료 |
+
+## 8. P0 Webhook
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| WH-01 | Webhook 반복 수신 | 중복 확정 없음 |
+| WH-02 | 순서 역전 | PG 재조회 기준 반영 |
+| WH-03 | 위조 서명(서명 제공 PG) | 상태 변경 없음 |
+| WH-04 | event ID 없는 webhook | provider dedupe key 적용 |
+| WH-05 | **첫 처리 FAILED 후 같은 이벤트 재전송** | 재처리되어 반영 |
+| WH-06 | PROCESSING lease 만료 | 재처리 |
+| WH-07 | 결제 미매칭 이벤트 | `UNMATCHED` + review case |
+| WH-08 | payload 금액·상태 위조(서명 미제공 PG) | 재조회 결과로만 반영 |
+| WH-09 | 취소(환불) 이벤트 | 환불 대사 실행 |
+
+## 9. P0 환불 [확정 D-007]
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| REF-01 | 요청 기록 | `REQUESTED`, 티켓 `ISSUED`, 좌석 `SOLD`, 한도 불변 |
+| REF-02 | PG 실행 기록 → 검증 성공(전액) | `COMPLETED`, 티켓 VOID, 좌석 해제, 한도 복구, 주문 `REFUNDED` |
+| REF-03 | 부분 환불(4석 중 1석) | 해당 항목만, 주문 `PAID` 유지 |
+| REF-04 | `SEAT` 항목 합계 ≠ 총액 | 거부 |
+| REF-05 | 같은 항목 중복 환불 요청 | 거부 |
+| REF-06 | 결제별 누적(완료+진행 중) > 승인 금액 | 거부, CHECK 최종 방어 |
+| REF-07 | 동시 환불 요청 | 잠금으로 초과 방지 |
+| REF-08 | PG 재조회 결과 환불 없음 | `FAILED`, 좌석·티켓 유지 |
+| REF-09 | PG 환불 성공 후 DB 반영 실패 | `VERIFYING` 잔존 → 재검증으로 멱등 복구, 이중 기록 없음 |
+| REF-10 | DB 요청 없이 PG에서 환불됨 | 취소 webhook/대사로 `REFUND_UNRECORDED` |
+| REF-11 | **REVIEW_REQUIRED 주문의 초과 결제 환불** | `PAYMENT_EXCESS`, 좌석·타인 티켓 불변 |
+| REF-12 | **소유 불일치 좌석 해제 시도**(fixture로 다른 항목이 소유) | 해제 거부, `SEAT_OWNERSHIP_MISMATCH` |
+| REF-13 | 중복 승인 결제(EXCESS) 환불 후 정상 결제 좌석 환불 | 서로 독립, 각 결제 한도 내 |
+| REF-14 | `SEAT` 유형을 EXCESS 결제에, `PAYMENT_EXCESS`를 PRIMARY에 | 거부 |
+| REF-15 | 환불 완료 커밋 시점 좌석 재점유 경합 | 커밋 전 점유 불가, 커밋 후 한도·좌석 동시 반영 |
+| REF-16 | 재판매 정책 BLOCKED/AVAILABLE 설정 | 설정대로 해제 상태 |
+| REF-17 | 사용자 입력만으로 완료 시도 | 불가(PG 검증 필수) |
+
+## 10. P0 관리자/Review case
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| ADM-01 | 비로그인 관리자 API | 401 |
+| ADM-02 | 비활성 관리자 로그인 | 거부 |
+| ADM-03 | 반복 로그인 실패 | rate limit |
+| ADM-04 | 좌석 차단/해제 | 상태 변경 및 audit log(같은 트랜잭션) |
+| ADM-05 | hold/SOLD 좌석 차단 | 거부 |
+| ADM-06 | STAFF가 SUPER_ADMIN 전용 action | 403 |
+| ADM-07 | review case action 각각 | 정의된 효과 + 감사 로그 |
+| ADM-08 | 열거 외 수정 요청 | 제공되지 않음 |
+| ADM-09 | DB 직접 수정 없는 복구(UNKNOWN 장기화, 금액 불일치, 미기록 환불) | 관리자 흐름으로 완료 |
+| ADM-10 | 로그인 시 세션 토큰 재발급, 로그아웃 시 폐기 | 확인 |
+| ADM-11 | 관리자 화면 전화번호 | 기본 마스킹 |
+
+## 11. P1 Outbox/Sheets 및 운영 작업
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| OUT-01 | 핵심 변경과 outbox 생성 | 같은 DB transaction(P0) |
+| OUT-02 | Sheets 장애 | 주문·결제 성공 유지 |
+| OUT-03 | 이벤트 재전송 | 중복 row 없음 |
+| OUT-04 | worker 동시 claim | 한 worker만 lease |
+| OUT-05 | worker crash | lease 만료 후 재시도 |
+| OUT-06 | 일시 실패 | backoff 재시도 |
+| OUT-07 | 최대 재시도 초과 | DEAD + review case |
+| OUT-08 | 같은 aggregate의 오래된 이벤트가 늦게 처리 | 최신 행 덮어쓰지 않음(SUPERSEDED) |
+| OUT-09 | Sheets payload | 전화번호 마스킹 |
+| OPS-01 | 만료 작업 중복 실행 | 안전 |
+| OPS-02 | 정합성 검사 | 불일치 시 review case |
+| OPS-03 | PG 일일 대사 | 미매칭 승인·미기록 환불 탐지 |
+
+## 12. E2E 필수 흐름
+
+1. 본인인증 → claim → 공연 → 회차 → 좌석 → 주문.
+2. 결제(PG sandbox) → 복귀 → 펜싱 → confirm → PAID → SOLD → 티켓 → 확인서.
+3. 취소 후 다른 좌석 재예매.
+4. 동일 좌석 경합(두 사용자).
+5. 동일인 한도: 2석 결제 + 2석 추가 + 1석 거부.
+6. 결제 중 브라우저 종료 및 UNKNOWN 복구.
+7. 7분 만료 직전 결제 진입 → 7분 경과 후 승인(펜싱으로 정상 확정).
+8. 조회용 본인인증 → 주문 목록 → 확인서.
+9. 관리자: REVIEW_REQUIRED 처리, 수동 환불 3단계, 한도 복구 확인.
+
+## 13. 보안 체크리스트
+
+- [ ] 주문번호만으로 주문 접근 불가
+- [ ] 인증 세션·접근 세션의 브라우저 바인딩, 다른 브라우저 재사용 불가
+- [ ] 인증 결과 1회 claim, 거래 ID 재사용 불가
+- [ ] Idempotency 소유 주체 분리(타인 키 재사용으로 주문·쿠키 획득 불가)
+- [ ] 토큰·키·동일인 식별값 원문 DB/로그 저장 금지
+- [ ] 쿠키 기반 API CSRF(Origin + 토큰), `__Host-` 쿠키
+- [ ] returnUrl 서버 결정, open redirect 없음
+- [ ] 외부 복귀 경로 쿠키 비의존·nonce 단일 사용
+- [ ] XSS/SQL injection 방어(raw query parameterized)
+- [ ] 관리자 권한 서버 검증, 권한 매트릭스
+- [ ] 인증·로그인·조회·주문·결제 rate limit(공유 저장소)
+- [ ] PG webhook 서명(지원 시)·재조회 기반 처리
+- [ ] secret 미커밋
+- [ ] 전화번호·토큰·카드정보 로그·Sheets 마스킹
+- [ ] CORS allowlist, HTTPS, Secure cookie
+- [ ] 백업/복구 권한 통제
+- [ ] 개인정보처리방침 게시
+
+## 14. 부하 테스트
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| LOAD-01 | 예상 최대 동시 접속(값은 사용자 결정)에서 좌석 조회 | 응답 시간 목표 충족 |
+| LOAD-02 | 인기 회차 오픈 시 동시 주문 경합 | 불변식 유지, 커넥션 고갈 없음 |
+| LOAD-03 | PG mock 지연 상황의 결제 확인 | 트랜잭션 장기 점유 없음 |
+
+## 15. Go / No-Go
+
+**Go:** P0 전부 통과, §1.1 불변식 위반 0건, 좌석 중복 판매·한도 초과 방지 검증, PG server-side verification 및 서버 승인형 동작 확인, 결제 확인 펜싱·UNKNOWN·중복 webhook·중복 승인 복구 검증, 인증 선행·바인딩·조회 보안 검증, **실제 PG/인증 환경 검증**, 수동 환불 3단계 리허설, 운영자 리허설 및 백업/복구 확인, 개인정보처리방침 게시, 중대한 보안 이슈 없음.
+
+**No-Go:** P0 하나라도 실패, PG/인증 실환경 검증 미완료, PG가 서버 승인형이 아님(설계 재검토 필요), UNKNOWN·좌석 경합·한도 경합 미검증, 개인정보 노출·인증 우회, 운영 복구 체계 미준비.
+
+P1 미완료는 수동 대체 수단과 사용자 승인이 있을 때만 Go 가능하다. 목표 공개일보다 안전한 판매가 우선이다.
+
+## 16. 변경 이력
+
+| 버전 | 일자 | 변경 내용 |
+|---|---|---|
+| 1.0 | 2026-11-13 | 개발 전달 기준안. 원문: `docs/archive/v1.0/TEST_PLAN` |
+| 1.1 | 2026-11-14 | 파일명 `TEST_PLAN.md`로 정정. 공통 사후 불변식, MIG(스키마 계약), QTA(동일인 4석·활성 주문), WH(재처리), LOAD 추가. 좌석 변경 테스트 삭제 → 취소 후 재예매(ORD-12~16). 인증 선행·바인딩·claim(IDV), 결제 확인 펜싱·3분 보호·UNKNOWN(PAY-05~11, 20~25), 소유 주체 Idempotency(ORD-05), 환불 유형·소유권·대사(REF-10~17), review case(ADM-07~09) 추가. 환불·관리자를 P0로 이동 |
