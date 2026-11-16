@@ -53,7 +53,7 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 0 | 문서/저장소 조사, 독립 기술 검토 | BLOCKER/HIGH 보고 | 완료 |
 | 0.5 | 검토 반영 문서 개정(v1.1 → v1.2), `DECISIONS.md`, `PROVIDERS.md` | 문서 교차 일치, **사용자 승인** | 진행 중 |
 | 1 | Next.js/TS 기반, lint/typecheck/test/build, env schema, CI, Clock 인터페이스, 오류 체계, **Provider 단계 설정·fail-closed 기동 검사**(ARCH §6.5), Secret 로딩 | clean clone에서 README대로 실행, CI 통과, PRV-01~05 통과 | 없음 |
-| 2 | Prisma schema + raw SQL migration(제약 전체, `UNFULFILLED`, `provider_context_encrypted`, `card_company`), seed(임시 좌석), **스키마 계약 테스트** | 빈 PostgreSQL migration 성공, MIG-* 통과 | v1.2 승인(Q-004는 D-014로 해소) |
+| 2 | Prisma schema + raw SQL migration(제약 전체, `UNFULFILLED`, `provider_context_encrypted`, `card_company`), seed(임시 좌석), **스키마 계약 테스트** | 빈 PostgreSQL migration 성공, MIG-* 통과 | v1.2 승인(Q-004는 D-014로 해소). **구현 완료·승인 대기**(2026-11-16): `DATABASE.md` §19, 미결정 Q-022~Q-026 |
 | 3 | 공연/회차/좌석 조회, 판매 가능 조건, 임시 seat map, **카드사 심사용 공개 페이지**(상품·약관·환불규정·사업자정보 자리) | DB 상태와 UI 일치 | E-003(실제 좌석은 자료 수령 후), E-008 |
 | 4 | identity: 바인딩·CSRF bootstrap, 인증 시작·콜백·claim, 인증 세션(고정 30분·잔여 10분·주문 생성 제한), subject HMAC, **Mock IdentityProvider**, NICE adapter 골격(원문 기준, 실호출 전) | IDV-* 통과(Mock), NIC-01~04(Mock 시나리오) | Q-002(식별값 — 설정 가능하게) |
 | 5 | booking: 주문 생성(한도 잠금·READ COMMITTED·잠금 후 판단·활성 주문·다중 점유), `expireOrder`, 취소 후 재예매, 소유 주체 Idempotency, 접근 세션, rate limit | SEAT-*, ORD-*, QTA-* 통과 | Q-011, Q-013(설정값) |
@@ -160,3 +160,4 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 1.0 | 2026-11-13 | 개발 전달 기준안. 원문: `docs/archive/v1.0/IMPLEMENTATION_PLAN` |
 | 1.1 | 2026-11-14 | 파일명 `IMPLEMENTATION_PLAN.md`로 정정. P0/P1 재정의(환불 기록·검증, 감사 로그, review case, outbox 생성을 P0로), Step 0.5 문서 개정 단계와 단계별 선행 결정 추가, 인증 선행·한도·결제 펜싱 단계 반영, 좌석 변경 제거, 일정 게이트(권장) 추가, 금지 사항 확장 |
 | 1.2 | 2026-11-15 | 토스페이먼츠·NICE아이디 확정 반영. 개발 원칙에 외부 승인과 독립된 진행·운영 Mock 차단·원문 기준 구현 추가. 단계표에 기동 검사(Step 1), 심사용 공개 페이지(Step 3), NICE adapter 골격(Step 4), 토스 Sandbox(Step 6), NICE 실연동(Step 10) 반영. §5를 진행/대기 작업, 외부 업체 트랙, 개발 로드맵, 실판매 개시 조건(D-012, D-013), 일정 판단으로 교체. 저장소 구조·금지 사항 갱신. 이전 원문: `docs/archive/v1.1/IMPLEMENTATION_PLAN.md` |
+| 1.2.1 | 2026-11-16 | Step 2 구현 상태 표기(단계표). 계획·일정은 변경 없음 |

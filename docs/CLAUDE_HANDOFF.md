@@ -49,6 +49,8 @@ v1.0·v1.1 원문은 `docs/archive/v1.0/`, `docs/archive/v1.1/`에 보존되어 
 - **Step 0(완료):** v1.0 문서 독립 기술 검토. BLOCKER B1~B5, HIGH H1~H9, MEDIUM M1~M12, LOW L1~L8 보고.
 - **Step 0.5(본 개정):** 검토 결과와 확정 정책을 v1.1 문서에 반영. 반영 위치는 `DECISIONS.md` §2(A-001~A-023).
 - 다음: 사용자 승인 → 구현 전 결정(§9) → Step 1·2 착수.
+- **Step 1(구현 완료):** 프로젝트 기반·Provider 기동 검사. 커밋 `0f9a299`(브랜치 `claude/nifty-heisenberg-awbjwi`).
+- **Step 2(구현 완료, 사용자 승인 대기):** PostgreSQL 27개 테이블, Prisma schema, raw SQL 제약, seed, 스키마 계약 테스트(MIG-01~08), CI `db` job. 구현 기록·설계와의 차이·발견 사항: `DATABASE.md` §19. 새 미결정: `DECISIONS.md` Q-022~Q-026.
 
 ## 5. 구현 시 특별히 지킬 설계 핵심
 
@@ -139,3 +141,4 @@ Next.js + TypeScript + React, PostgreSQL(15+ 권장), Prisma + raw SQL migration
 | 1.0 | 2026-11-13 | 최초 전달 지침. 원문: `docs/archive/v1.0/CLAUDE_HANDOFF` |
 | 1.1 | 2026-11-14 | 파일명 `CLAUDE_HANDOFF.md`로 정정, `DECISIONS.md` 추가 및 읽기 순서 조정, 확정 정책 요약, 검토 이력, 설계 핵심, 금지 사항 확장, 실행 순서에 문서 개정 단계 추가, Step 2 착수 전 결정 항목 명시 |
 | 1.2 | 2026-11-15 | 읽을 문서에 `PROVIDERS.md` 추가, 확정 정책 D-009~D-015 요약, 설계 핵심에 Provider·웹훅·비밀값·쿼터 격리 원칙 추가, 기술 방향을 토스·NICE 기준으로 갱신, 금지 사항 추가, Step 2 착수 전 결정 항목 갱신(Q-004·A-001 해소). 이전 원문: `docs/archive/v1.1/CLAUDE_HANDOFF.md` |
+| 1.2.1 | 2026-11-16 | 검토 이력에 Step 1·2 상태 추가. 정책·금지 사항은 변경 없음 |

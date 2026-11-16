@@ -228,6 +228,40 @@
 - **권장안:** 카드는 DEFAULT + 승인 카드사 `cardCompany`, 토스페이·네이버페이는 DIRECT + `easyPay`로 서비스 화면에서 수단을 먼저 고르게 한다. 통합결제창이 허용 외 간편결제를 노출하면 승인 후 검증(A-030)으로 확정을 막고, 토스에 선택적 활성화를 문의한다.
 - **상태:** 확인 필요(sandbox, 토스 문의).
 
+### Q-022. 허용되지 않은 결제수단으로 승인된 결제의 기록 방식 (Step 2 구현 중 발견)
+- **질문:** `DATABASE.md` §7.1은 `CHECK (method_type IN ('CARD','EASY_PAY'))`(D-005)를 요구한다. 반면 A-030/§11.6은 PG가 허용되지 않은 수단(가상계좌 등)이나 허용 목록 밖 카드사·간편결제사로 **승인했다고 보고하면 확정하지 않고 `role = EXCESS` + `review_cases(DISALLOWED_METHOD)`로 처리**하라고 한다. 이때 `payments` 행의 `method_type`(NOT NULL)에 넣을 값이 정의되어 있지 않다. 토스 대응표는 "허용 외 값은 `DISALLOWED`"라고만 한다.
+- **선택지:** (a) `method_type` CHECK를 `CARD`/`EASY_PAY`/`OTHER`(또는 `DISALLOWED`)로 확장하고 `OTHER`는 항상 `role = EXCESS`로 제한하는 추가 CHECK, (b) `method_type`을 nullable로 하고 허용 외는 NULL + `review_cases.detail`에 원문 수단 기록, (c) 현행 CHECK 유지하고 허용 외 승인은 가장 가까운 값으로 강제 매핑(권장하지 않음: 사실 왜곡).
+- **영향:** `payments_method_type_ck`, `easy_pay_provider`/`card_company` 허용 값 CHECK 여부(현재 없음), Step 6 결제 확정 경로, TEST PAY-17·PAY-26.
+- **권장:** (a). 승인된 결제를 DB에 기록하지 못하는 경로를 없애는 것이 환불 추적에 필수다.
+- **결정 담당:** 사용자. **기한:** Step 6 착수 전. **상태:** 미결정. 현재 구현은 문서 그대로(`CARD`/`EASY_PAY`만 허용).
+
+### Q-023. `order_items` 삭제 차단 범위 (Step 2)
+- **질문:** §5.2는 "생성 후 UPDATE·DELETE하지 않는다"고 하면서 DB 보호로는 UPDATE 차단 트리거만 언급한다. 현재 UPDATE는 트리거로, 다른 테이블이 참조하는 항목의 DELETE는 `ON DELETE RESTRICT`로 막히지만 **참조되지 않는 항목의 DELETE는 허용**된다(주문 생성 트랜잭션 롤백 외에는 필요 없음).
+- **선택지:** (a) 현행 유지, (b) DELETE도 트리거로 차단(주문 생성 롤백은 트랜잭션 취소이므로 영향 없음. 단 향후 개인정보 파기·보관기간 작업이 항목을 지워야 하면 우회 절차 필요).
+- **영향:** DATABASE §5.2, TEST ORD-17, Q-016(보관·파기).
+- **결정 담당:** 사용자(보관·파기 정책과 함께). **상태:** 미결정, 현행 (a).
+
+### Q-024. 인증 세션과 원 인증 거래의 주체·용도 일치를 DB가 보장하지 않음 (Step 2)
+- **질문:** `identity_sessions.identity_subject_id`/`purpose`가 연결된 `identity_verifications`와 같아야 한다는 규칙(§6.3 "claim 트랜잭션에서 검증")은 서비스 검증에만 의존한다. 규칙 12(주문↔인증 세션 주체 일치)는 DB가 보장하지만 이 한 단계 위는 아니다.
+- **선택지:** (a) 현행(서비스 검증), (b) `identity_verifications`에 `UNIQUE (id, identity_subject_id, purpose)`를 두고 `identity_sessions (identity_verification_id, identity_subject_id, purpose)` 복합 FK 추가.
+- **영향:** 제약 2개 추가(컬럼·테이블 추가 없음), Step 4 claim 트랜잭션, MIG-04 목록.
+- **권장:** (b). 한도·활성 주문의 기준인 `identity_subject_id`가 잘못 연결되는 사고를 DB가 막는다. 설계 변경이므로 사용자 승인 필요.
+- **결정 담당:** 사용자. **기한:** Step 4 착수 전. **상태:** 미결정.
+
+### Q-025. 주문번호 형식과 DB sequence (Step 2에서 보류)
+- **질문:** §5.1은 `NZ-202611-000001` 예시와 "DB sequence 기반 생성"을 말하지만 월별 리셋 여부·자릿수·동시성(sequence는 롤백 시 번호가 비는 것을 허용) 정책이 없다.
+- **선택지:** (a) 전역 단일 sequence + 월 표기만 포맷, (b) 월별 카운터 테이블(번호 연속, 잠금 필요), (c) 전역 sequence 번호 + 난수 검증 문자.
+- **영향:** `orders.order_number`(UNIQUE는 구현됨), Step 5 주문 생성, 고객 문의 처리(번호 공개).
+- **권장:** (a). 번호 결번을 허용하고 락 경합을 피한다.
+- **결정 담당:** 사용자. **기한:** Step 5 착수 전. **상태:** 미결정(sequence는 아직 만들지 않음).
+
+### Q-026. `updated_at` 자동 갱신 방식 (Step 2)
+- **질문:** 현재 `updated_at`은 Prisma Client(`@updatedAt`)만 갱신한다. Step 5 이후 잠금 쿼리를 raw SQL로 쓰면 서비스가 직접 갱신해야 하고 누락될 수 있다.
+- **선택지:** (a) 현행 + 코드 리뷰 규칙, (b) 공용 `BEFORE UPDATE` 트리거로 `updated_at = now()` 강제(`order_items`는 해당 없음).
+- **영향:** 모든 `updated_at` 보유 테이블(트리거 19개), Sheets outbox의 `aggregate_version`과는 별개.
+- **권장:** (b)는 마이그레이션 1개로 해결되나 설계 문서에 없는 DB 객체 추가이므로 승인 후 도입.
+- **결정 담당:** 사용자. **기한:** Step 5 착수 전. **상태:** 미결정, 현행 (a).
+
 ---
 
 ## 4. 외부 확인 필요 [외부 확인]
@@ -269,3 +303,4 @@
 |---|---|---|
 | 1.1 | 2026-11-14 | 신규 작성. 사용자 확정 정책 D-001~D-008, 기술 검토 반영 채택안 A-001~A-023, 미결정 Q-001~Q-016, 외부 확인 E-001~E-011 기록 |
 | 1.2 | 2026-11-15 | 확정 D-009~D-015(토스·NICE, 결제창 API 개별 연동, 1차 결제수단, 판매 개시 조건, NICE 지연 시 연기·Mock 판매 금지, 활성 주문 범위·UNFULFILLED, 인증 세션 규칙). 채택안 A-024~A-031(Provider 단계·fail-closed, 단계 DB 미저장, Mock 빌드 제거 비필수, 웹훅 처리, 거래별 문맥·Secret 분리, 쿼터 격리·잠금 후 판단, 결제수단 허용 목록, confirm timeout과 3분 보호). Q-001~Q-005·Q-013 갱신, Q-017~Q-021 신설, E-001·E-002·E-007·E-008 원문 확인 결과 반영. 이전 원문: `docs/archive/v1.1/DECISIONS.md` |
+| 1.2.1 | 2026-11-16 | Step 2 구현 중 발견한 문서 충돌·공백 Q-022~Q-026 추가(확정·채택 항목은 변경 없음). 상세는 `DATABASE.md` §19.6~§19.7 |

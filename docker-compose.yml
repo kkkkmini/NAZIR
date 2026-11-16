@@ -1,0 +1,23 @@
+# Local development PostgreSQL (DATABASE.md targets PostgreSQL 16).
+#   docker compose up -d db
+#   npm run db:migrate:deploy && npm run db:seed
+# The credentials are for this local container only.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: nazir
+      POSTGRES_PASSWORD: nazir
+      POSTGRES_DB: nazir_dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - nazir-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nazir -d nazir_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  nazir-pgdata:

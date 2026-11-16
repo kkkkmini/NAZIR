@@ -61,7 +61,7 @@ function read(env: Env, name: string): string | undefined {
   return t === "" ? undefined : t;
 }
 
-function resolveRuntimeEnv(env: Env): { runtimeEnv: RuntimeEnv; assumed: boolean } {
+export function resolveRuntimeEnv(env: Env): { runtimeEnv: RuntimeEnv; assumed: boolean } {
   const raw = read(env, "NAZIR_RUNTIME_ENV");
   if (raw && (RUNTIME_ENVS as readonly string[]).includes(raw)) {
     return { runtimeEnv: raw as RuntimeEnv, assumed: false };

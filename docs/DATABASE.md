@@ -7,6 +7,7 @@
 > 적용 범위: Phase 1 예매 MVP + Phase 2 이후 확장 기반
 > 관련 문서: `DECISIONS.md`(정책·미결정), `PROVIDERS.md`(업체 근거), `API_SPEC.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`, `TEST_PLAN.md`, `CLAUDE_HANDOFF.md`
 > 이전 버전 원문: `docs/archive/v1.0/DATABASE.md`, `docs/archive/v1.1/DATABASE.md`
+> 구현 현황: §19 (Step 2 — Prisma schema·migration·계약 테스트, **설계 변경 없음**. 설계와 다른 점은 §19.6에 모두 열거)
 
 표기: **[확정]** 사용자 확정 정책 · **[채택]** 설계 채택안(승인 대기) · **[권장]** 미결정 항목의 권장 기본값 · **[외부 확인]** 업체·법률 확인 필요. 상세는 `DECISIONS.md`.
 
@@ -1275,3 +1276,161 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.0 | 2026-11-13 | 개발 전달 기준안(0.3 내용 기준, 문서 상태 표기만 1.0). 원문: `docs/archive/v1.0/DATABASE.md` |
 | 1.1 | 2026-11-14 | v1.0 독립 기술 검토(B1~B5, H1~H9, M1~M12) 및 사용자 확정 정책(D-001~D-008) 반영. 인증 선행 구조(`identity_subjects`/`identity_sessions`, `identity_verifications.order_id` 제거), 동일인·회차 4석 한도(`purchase_quotas`), 활성 주문 partial unique, 좌석 변경 제거(`order_items` 불변, hold 1:1), 주문 단위 7분 만료, 결제 확인 펜싱(`CONFIRMING`)과 3분 보호·UNKNOWN 해소, 확정 결제 FK와 `EXCESS` 결제, 판매 좌석 소유권, 환불 유형·검증 절차·결제별 누적 CHECK, webhook 재처리, 소유 주체 Idempotency, 관리자 세션, review case, 상태 전이표, 전역 잠금 순서, Prisma/raw SQL 전략. 테이블 21 → 27개 |
 | 1.2 | 2026-11-15 | 토스페이먼츠·NICE아이디 확정(D-009~D-013) 및 원문 확인 반영. 주문 상태 `UNFULFILLED` 추가와 `RELEASE_SEATS` 원자 전이(결제 결과 확정 확인·좌석 해제·쿼터 반환·활성 주문 해제, D-014). `purchase_quotas` READ COMMITTED·잠금 후 판단·`seat_limit` snapshot·동시 실행 순서(A-029). BOOKING 세션 고정 30분·재사용·주문 생성 제한·잔여 10분(D-015). `identity_verifications.provider_context_encrypted`(거래별 임시 문맥만, A-028). `payments.card_company`, `easy_pay_provider` 허용 값, 토스 필드 대응표, 결제수단 허용 목록 검증(A-030). 웹훅 서명·eventId dedupe·10초 응답·비동기 조회(A-027). confirm timeout과 3분 보호 관계(A-031). Provider 단계 미저장 근거(§14.2). 테이블 수 변동 없음(27개). 이전 원문: `docs/archive/v1.1/DATABASE.md` |
+| 1.2.1 | 2026-11-16 | Step 2 구현 현황(§19) 추가. 설계(A-001~A-031)·테이블 구조는 변경하지 않음. 구현 중 발견한 문서 충돌·공백은 `DECISIONS.md` Q-022~Q-026으로 등록 |
+
+---
+
+## 19. 구현 현황 (Step 2: PostgreSQL schema·migration·계약 테스트)
+
+> 이 절은 **구현 기록**이다. 위 §1~§17의 설계를 바꾸지 않는다. 설계와 다르거나 설계에 없는 구현은 §19.6에 모두 열거했으며, 승인 전에는 "구현됨(승인 대기)"로 취급한다. 구현 기준 버전: PostgreSQL 16(15+ 필수), Prisma 7.10.1.
+
+### 19.1 결과 요약
+
+| 항목 | 결과 |
+|---|---|
+| 테이블 | 27개 전부(§3). `rate_limit_counters`는 Q-013 미결정이라 만들지 않음 |
+| 외래 키 | 39개(복합 13개). **전부 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`**, 즉시 검사, MATCH SIMPLE |
+| CHECK | 47개(상태값 31 + 금액·한도·소유 16) |
+| UNIQUE | 36개(PK·partial 제외). 그중 `seats` 1개는 `NULLS NOT DISTINCT` |
+| partial unique | 5개: 좌석 live hold, 활성 주문, 진행 중 결제, 유효 티켓, open review case |
+| 트리거 | 1개: `order_items` UPDATE 차단 |
+| 인덱스 총수 | 95개(PK 27개 + Prisma 관리 테이블 `_prisma_migrations` PK 1개 포함) |
+
+### 19.2 migration 및 파일 목록
+
+| 파일 | 내용 |
+|---|---|
+| `prisma/schema.prisma` | 27개 모델. 모든 FK(복합 FK 포함)·일반 unique·index 선언 |
+| `prisma/migrations/20261116140000_init_schema/migration.sql` | **Prisma 생성 SQL**(`migrate diff --from-empty --to-schema`)에 **두 곳만 수기 수정**: ① `CREATE SCHEMA IF NOT EXISTS "public"` 제거, ② `seats_venue_section_row_number_nnd_uq`를 `NULLS NOT DISTINCT`로 교체 |
+| `prisma/migrations/20261116140100_integrity_constraints/migration.sql` | **수기 raw SQL**: partial unique 5개, CHECK 47개, 트리거 함수·트리거 |
+| `prisma/migrations/migration_lock.toml` | `provider = "postgresql"` |
+| `prisma.config.ts` | Prisma 7 CLI 설정(`.env.local`→`.env` 로드, `DATABASE_URL`, `SHADOW_DATABASE_URL`, seed 명령) |
+| `prisma/seed.ts` | 개발·테스트 전용 임시 seed(§19.9) |
+| `src/server/db/constants.ts` | 상태값 상수(DB CHECK와 1:1, 테스트 MIG-03b가 대조) |
+| `src/server/db/client.ts` | 서버 전용 Prisma Client(driver adapter `@prisma/adapter-pg`, DB·환경 일치 검증) |
+| `src/server/db/seed-guard.ts` | seed 실행 가드 |
+| `src/server/config/database-config.ts` | `DATABASE_URL` 파싱·개발/테스트 DB 분리 가드(순수 함수) |
+| `tests/contract/schema/*` | 스키마 계약 테스트(§19.3) |
+
+### 19.3 핵심 무결성 규칙 ↔ DB 제약 ↔ 테스트
+
+테스트는 `tests/contract/schema/`에 있으며 **실제 PostgreSQL의 카탈로그**(`pg_index`, `pg_constraint`, `pg_trigger`, `information_schema`)를 조회하고, 동작 테스트는 위반 INSERT/UPDATE가 **SQLSTATE와 제약 이름까지** 일치해 거부되는지 확인한다.
+
+| # | 규칙 | DB 제약(이름) | 테스트 |
+|---|---|---|---|
+| 1 | 좌석당 live hold ≤ 1 | `seat_holds_active_seat_uq` (partial unique, `ACTIVE`/`CONFIRMING`) | integrity "rule 1" + **실제 2커넥션 동시 INSERT** |
+| 2 | 주체·회차당 활성 주문 ≤ 1 | `orders_active_subject_session_uq` (partial unique, 4개 활성 상태) | "rule 2" (D-014 `UNFULFILLED` 해제 포함) |
+| 3 | 주문당 진행 중 결제 ≤ 1 | `payments_in_progress_order_uq` | "rule 3" |
+| 4 | 주문 항목은 주문과 같은 회차 | `order_items_order_session_fk`, `order_items_seat_session_fk` | "rules 4 & 5", MIG-08 |
+| 5 | 회차 공연장의 좌석만 판매 | `session_seats_session_venue_fk`, `session_seats_seat_venue_fk`, `show_sessions_show_venue_fk` | "rules 4 & 5", MIG-08 |
+| 6 | SOLD ⇔ 소유 항목, 소유 항목은 그 좌석의 항목 | `session_seats_sold_owner_ck`, `session_seats_sold_item_seat_fk`, `session_seats_sold_order_item_id_uq` | "rule 6" |
+| 7 | 좌석당 유효 티켓 ≤ 1, 항목당 티켓 1 | `tickets_valid_seat_uq`, `tickets_order_item_id_uq` | "rule 7" |
+| 8 | 확정 결제는 같은 주문의 결제 | `orders_confirmed_payment_fk`(복합), `orders_confirmed_payment_id_uq` | "rules 8 & 9" |
+| 9 | `PAID`는 확정 결제 보유 | `orders_paid_requires_confirmed_payment_ck` | "rules 8 & 9" |
+| 10 | 환불 누적 ≤ 승인 금액 | `payments_refunded_amount_ck` | "rule 10" |
+| 11 | 한도 카운터 0 ≤ counted ≤ limit ≤ 4 | `purchase_quotas_counted_seats_ck`, `purchase_quotas_seat_limit_ck`, `show_sessions_max_seats_per_identity_ck` | "rule 11" |
+| 12 | 인증 세션 ↔ 주체 일치 | `orders_identity_session_subject_fk`(복합) | "rule 12" |
+| 13 | 주문·hold·항목·티켓·환불 소속 일치 | `seat_holds_item_order_seat_fk`, `tickets_item_seat_fk`, `refunds_payment_order_fk`, `refund_items_refund_order_fk`, `refund_items_item_order_fk` | "rule 13", MIG-08 |
+| 14 | `order_items` 불변 | 트리거 `order_items_no_update` → SQLSTATE `23001` | "rule 14" (ORD-17) |
+
+TEST_PLAN MIG-01~08 대응: `migrations.test.ts`(MIG-01~04, 06, 07, DRIFT-01), `integrity.test.ts`(MIG-05 동작, MIG-08, 규칙 1~14), `seed.test.ts`(SEED-01~04). 검사 함수가 **공허하지 않음**을 보이기 위해 일부러 망가뜨린 DB에서 위반을 검출하는 음성 대조군을 포함하며, 구현 중 migration에서 제약 4개를 제거해 11개 테스트가 실패함을 확인했다.
+
+### 19.4 raw SQL로 구현한 객체 (`..._integrity_constraints`)
+
+- **partial unique index (5)**: `seat_holds_active_seat_uq`, `orders_active_subject_session_uq`, `payments_in_progress_order_uq`, `tickets_valid_seat_uq`, `review_cases_open_dedupe_uq`
+- **CHECK (47)**: 이름 규칙 `<table>_<column>_ck`. 상태값 31개는 `src/server/db/constants.ts`와 동일 어휘(테스트 MIG-03b), 나머지 16개는 금액·한도·소유·PAID·확인 보호 시각. 전체 목록은 `tests/contract/schema/manifest.ts`의 `CHECKS`
+- **함수·트리거**: `order_items_reject_update()` + `order_items_no_update`(BEFORE UPDATE, FOR EACH ROW)
+- **`NULLS NOT DISTINCT`**: `init_schema`에서 수기 교체한 `seats_venue_section_row_number_nnd_uq`
+
+### 19.5 Prisma schema와 SQL migration의 차이
+
+Prisma 7.10.1을 **실측**한 결과(`prisma migrate diff`):
+
+| 객체 | Prisma의 동작 | 대응 |
+|---|---|---|
+| 스키마에 없는 partial unique index, CHECK, trigger | diff에서 **무시**(DROP 안 함) | 스키마에 선언하지 않음(스키마가 거짓말하지 않도록). 계약 테스트가 보호 |
+| 스키마에 없는 `NULLS NOT DISTINCT` unique, 일반 index | **DROP을 생성**함 | `seats` unique를 스키마에 일반 unique로 선언하고 migration에서만 `NULLS NOT DISTINCT`로 교체 |
+| 스키마에 선언한 복합 FK(자기 PK를 일부로 쓰는 순환 FK 포함) | 정상 | **모든 FK를 Prisma에 선언**. raw SQL로만 만든 FK는 없음 |
+
+추가 차이:
+- 상태값은 Prisma enum이 아니라 `varchar + CHECK`(§1.2가 허용). partial index 조건·CHECK·상수가 같은 문자열 어휘를 쓰기 위함.
+- Prisma relation 일부는 DB가 1:1이지만 Prisma상 1:n이다(`seat_holds.order_item_id`, `tickets.order_item_id`, `orders.confirmed_payment_id`). Prisma는 1:1로 보려면 관계 필드 **전체**를 덮는 unique를 요구하기 때문.
+- `id`는 DB 기본값 `gen_random_uuid()`(PostgreSQL 13+ 내장, 확장 불필요). raw SQL INSERT가 클라이언트 없이 동작.
+- **`updated_at`은 Prisma Client(`@updatedAt`)만 갱신한다.** DB 기본값은 `now()`이고 UPDATE 트리거는 없다 → raw SQL 쓰기 코드는 직접 갱신해야 한다(Q-026).
+- 제약·인덱스 이름은 전부 명시(`_uq`, `_fk`, `_ck`, `_idx`). Prisma 기본 명명이 버전 간에 바뀌어도 rename diff가 나지 않고, §14.1의 "제약 이름별 도메인 오류 변환"에 쓸 수 있다. 이름 상수: `src/server/db/constants.ts`의 `DB_CONSTRAINT`.
+- 드리프트 방지: 테스트 DRIFT-01이 `prisma migrate diff --from-migrations --to-schema --exit-code`가 비어 있음을 검사한다(스키마 ≡ migrations, raw SQL 객체가 다음 Prisma migration에서 DROP되지 않음).
+
+### 19.6 DATABASE.md 설계 대비 구현상 차이·추가 (**사용자 승인 필요**)
+
+설계 채택안(A-001~A-031)은 변경하지 않았다. 아래는 문서가 명시하지 않아 구현자가 선택한 사항이다.
+
+| # | 내용 | 근거·영향 |
+|---|---|---|
+| D1 | `seat_status_logs (session_seat_id, created_at)` 인덱스 추가 | §14에 없음. 다른 로그 테이블과 동일한 조회 패턴 |
+| D2 | `purchase_quotas.version` 기본값 0 | §5.7에 기본값 없음. `INSERT ... ON CONFLICT DO NOTHING`이 version 없이 가능하도록 |
+| D3 | `created_at`/`updated_at` DB 기본값 `now()` | §1.2는 NOT NULL만 규정 |
+| D4 | `payments.easy_pay_provider`·`card_company`에 허용 값 CHECK **없음** | §7.1 "Phase 1 허용 값"은 설명이며 §7.1 제약 목록에 없음. A-030(허용 외 값을 보존) 및 Q-022와 충돌 가능 |
+| D5 | `payment_webhook_events.payload_redacted`, `payment_status_logs.source_event_id` 등 NOT NULL·FK가 명시되지 않은 컬럼은 **nullable, FK 없음** | 문서가 NOT NULL로 표기한 컬럼만 NOT NULL |
+| D6 | 로그 테이블의 `from_status`/`to_status`는 어휘 CHECK 없음 | 문서가 열거하지 않음. `source`·`actor_type`은 열거되어 CHECK |
+| D7 | `order_items` **DELETE는 차단하지 않음**(UPDATE만) | §5.2는 UPDATE 차단 트리거를 언급. 참조되는 항목은 RESTRICT로 보호됨. Q-023 |
+| D8 | `order_number` 생성용 sequence 미생성 | §5.1 "DB sequence 기반"이지만 형식·리셋 정책 미정. Step 5. Q-025 |
+
+### 19.7 구현 중 발견한 문서 충돌·공백 (임의 해석하지 않음)
+
+| ID | 내용 | 현재 구현 |
+|---|---|---|
+| Q-022 | §7.1 `CHECK (method_type IN ('CARD','EASY_PAY'))`과 A-030/§11.6("허용되지 않은 수단(가상계좌 등)이 승인되면 `role = EXCESS` + review case")이 충돌한다. 허용 외 수단의 승인 결제를 **어떤 `method_type` 값으로** 저장하는지 정의가 없다(토스 대응표는 "허용 외 값은 `DISALLOWED`"라고만 함). | 문서 그대로 CHECK 구현. 승인 결제를 DB에 기록하지 못하는 경로가 생길 수 있어 **Step 6 전에 결정 필요** |
+| Q-023 | `order_items` 삭제 차단 범위 | UPDATE만 차단(D7) |
+| Q-024 | `identity_sessions.purpose`/`identity_subject_id`가 원 `identity_verifications`와 같아야 한다는 규칙(§6.3 "claim 트랜잭션에서 검증")을 DB가 보장하지 않는다. | 미구현. 복합 FK `(identity_verification_id, identity_subject_id, purpose)` 제안 |
+| Q-025 | `order_number` 형식(`NZ-YYYYMM-NNNNNN`)과 sequence(월별 리셋 여부) | 미구현(Step 5) |
+| Q-026 | `updated_at` 자동 갱신 방식(Prisma `@updatedAt`만 vs DB 트리거) | Prisma Client만 |
+
+### 19.8 DB가 보장하지 않아 서비스가 반드시 지켜야 하는 규칙
+
+- **상태 전이 유효성**(§12): CHECK는 어휘만 검사한다. 정의되지 않은 전이는 서비스가 거부해야 한다.
+- **전역 잠금 순서**(§13.2: quota → orders → payments → refunds → session_seats(id 순) → seat_holds → tickets)와 READ COMMITTED 명시는 DB로 강제할 수 없다. 각 잠금 대상은 PK 또는 unique로 단건 조회된다(`purchase_quotas` 복합 PK, `session_seats` PK, `seat_holds (order_id, status)`, `tickets.order_item_id`).
+- `refund_items.amount ≤ order_items.price`, `refunds.total_amount = SUM(refund_items.amount)`, 항목당 환불 1건(§7.5)은 교차 행 규칙이라 CHECK로 표현할 수 없다 → 환불 트랜잭션 검증.
+- `purchase_quotas.counted_seats`가 §5.7 규칙의 파생값과 일치하는지(`QUOTA_MISMATCH` 감시)는 정기 검사.
+- hold 상태와 `session_seats.status`의 상호 일관성(예: hold `CONVERTED` ⇔ 좌석 `SOLD`), 주문 `PAID`와 티켓·좌석 상태의 일관성은 판매 확정 트랜잭션이 보장한다.
+- 만료 판정은 `orders.hold_expires_at`과 DB 시각(Clock). `seat_holds.expires_at`은 만들지 않았다.
+- `updated_at` 갱신(§19.5), 토큰·nonce·키는 hash만 저장(컬럼 이름만 `*_hash`이며 DB가 형식을 검증하지 않음).
+
+### 19.9 로컬 설정·테스트·seed 실행
+
+```bash
+# 1) PostgreSQL 16 (Docker) — 또는 로컬 PostgreSQL 15+
+docker compose up -d db
+
+# 2) 환경변수 (.env.example 참고)
+cp .env.example .env.local     # DATABASE_URL, TEST_DATABASE_URL
+
+# 3) 설치(postinstall 이 prisma generate 실행) → migration → seed
+npm ci
+npm run db:migrate:deploy      # 공유 환경에서도 이 명령만 사용. db push 금지
+npm run db:seed                # NAZIR_RUNTIME_ENV=local 에서만 동작
+
+# 4) 스키마 계약 테스트(실제 PostgreSQL 필요, 건너뛰지 않음)
+npm run test:db
+```
+
+- `npm test`는 DB 없이 실행되는 단위 테스트만 포함한다. DB 테스트는 `npm run test:db`(CI의 `db` job).
+- `TEST_DATABASE_URL`은 이름이 `_test`로 끝나고 호스트가 로컬이어야 하며 `DATABASE_URL`과 달라야 한다. 지정한 DB 자체에는 쓰지 않고, 같은 서버에 `nazir_ct_<time>_<rand>_test` throwaway DB를 만들어 쓴 뒤 삭제한다(비정상 종료로 남은 1시간 이상 된 것은 다음 실행에서 정리).
+- 개발 DB는 이름이 `_test`로 끝나면 `NAZIR_RUNTIME_ENV=test`가 아닌 환경에서 서버 기동·seed가 거부되고, `NAZIR_RUNTIME_ENV=test`는 `_test` DB만 허용한다(`src/server/config/database-config.ts`).
+- **seed**: `[DEV SEED]` 표시가 붙은 임시 공연장 1·공연 1·회차 2·좌석 78·회차별 판매 좌석 156. 가격(110,000/150,000원)·배치는 **임시 값**이며 E-003/E-004 확정 전까지 실제 데이터로 취급하지 않는다. 결정적 UUID + `ON CONFLICT DO NOTHING`이라 반복 실행해도 늘지 않는다. `NAZIR_RUNTIME_ENV`가 없거나 `local`·`test`가 아니면(=production 간주 포함) 실행을 거부한다.
+- 새 migration을 만들 때: `prisma migrate dev --create-only`로 SQL을 생성한 뒤 **직접 검토**해서 raw SQL 객체를 DROP하는 문장이 없는지 확인하고, `npm run test:db`(MIG-06, DRIFT-01 포함)를 실행한다.
+
+### 19.10 구현 중 확인된 설계 위험
+
+1. **Q-022**(허용 외 결제수단 기록 불가 가능성)는 Step 6 결제 구현 전에 결정이 필요하다.
+2. 순환 FK(`session_seats`↔`order_items`, `orders`↔`payments`)는 삽입 순서에 제약을 준다. 판매 확정 시에만 `sold_order_item_id`·`confirmed_payment_id`를 설정하는 §4.5의 전제를 서비스가 지켜야 한다. 반대로 항목·결제를 지우는 일반 운영 경로는 RESTRICT로 막힌다.
+3. 활성 주문 partial unique가 `REVIEW_REQUIRED`를 포함하므로 운영자가 처리하기 전까지 해당 주체는 같은 회차를 새로 예매할 수 없다(D-014 의도). 운영 절차(`RELEASE_SEATS`) 지연이 곧 고객 영향이다.
+4. 커넥션 풀러(트랜잭션 모드)와 `FOR UPDATE`·interactive transaction 호환성은 **검증하지 못했다**(호스팅 미정, E-007). Prisma 7 driver adapter(`pg`)는 직접 연결에서만 테스트했다.
+5. 인덱스는 §14 기준이다. `order_items(session_seat_id)`, `refunds(payment_id)` 조회는 지원 인덱스가 없다(복합 FK 참조측). 실제 쿼리 패턴이 생기는 Step 3·5·8에서 `EXPLAIN`으로 검토한다.
+6. 빈 DB의 첫 migration 적용만이 아니라 **운영 데이터가 있는 DB에 대한 migration 안전성**(락 시간 등)은 이번 범위가 아니다. 이후 migration은 MIG-06·DRIFT-01로 보호된다.
+
+### 19.11 Step 3 인계
+
+- 공연/회차/좌석 조회는 `src/server/db/client.ts`의 `getPrisma()`를 사용한다. 좌석 표시 상태는 §11.1 우선순위로 계산하며 `HELD`는 저장되지 않는다.
+- `npm run db:seed` 후 `dev-seed-musical` 공연으로 UI를 개발할 수 있다(임시 데이터).
+- 쓰기 경로(Step 5 이후)는 반드시 raw query + 명시적 READ COMMITTED + §13.2 잠금 순서를 따르고, `updated_at`을 직접 갱신한다. 제약 이름은 `DB_CONSTRAINT`로 도메인 오류에 매핑한다.
+- Step 3 착수 전 사용자 결정 필요: §19.6 D1~D8 승인, Q-022(Step 6 전), Q-024.

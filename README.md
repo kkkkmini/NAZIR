@@ -5,7 +5,8 @@
 ## 요구 사항
 
 - Node.js 22 이상
-- (Step 2부터) PostgreSQL 15 이상
+- PostgreSQL 15 이상(프로젝트 기준 16). `UNIQUE NULLS NOT DISTINCT`가 15+ 기능이다
+- Docker(로컬 PostgreSQL용, 선택)
 
 ## 로컬 실행
 
@@ -17,10 +18,27 @@ npm run dev                  # http://localhost:3000
 
 상태 확인: `GET http://localhost:3000/api/v1/health` (비밀값 없는 실행 환경·Provider 단계 정보)
 
+## Database (Step 2)
+
+PostgreSQL이 유일한 정본이다. 스키마는 Prisma + raw SQL migration이며 설계는 [`docs/DATABASE.md`](docs/DATABASE.md), 구현 기록은 §19에 있다.
+
+```bash
+docker compose up -d db                 # PostgreSQL 16 (로컬 전용 계정 nazir/nazir)
+cp .env.example .env.local              # DATABASE_URL(개발 DB), TEST_DATABASE_URL(테스트 서버)
+npm ci                                  # postinstall 이 prisma generate 를 실행한다
+npm run db:migrate:deploy               # migration 적용. 공유 환경에서도 이 명령만 사용한다
+npm run db:seed                         # 임시 개발 데이터(local/test 환경에서만 실행)
+```
+
+- **개발 DB와 테스트 DB는 이름으로 분리한다.** 이름이 `_test`로 끝나는 DB는 `NAZIR_RUNTIME_ENV=test`에서만 쓸 수 있고, 반대로 `test` 환경은 `_test` DB만 쓸 수 있다. 서버 기동·seed가 위반 시 거부한다.
+- **`prisma db push`와 `prisma migrate reset`을 공유 환경에서 쓰지 않는다.** 새 migration은 `prisma migrate dev --create-only`로 만들고 SQL을 직접 검토한다(raw SQL 객체 DROP 금지, MIG-06).
+- seed는 `[DEV SEED]` 임시 공연·좌석·가격이다. 실제 운영 데이터가 아니며 `NAZIR_RUNTIME_ENV`가 없거나 `local`·`test`가 아니면 실행을 거부한다.
+
 ## 검사
 
 ```bash
-npm run check          # lint + typecheck + 단위 테스트
+npm run check          # lint + typecheck + 단위 테스트(DB 불필요)
+npm run test:db        # 스키마 계약 테스트 MIG-01~08 (실제 PostgreSQL 필요, TEST_DATABASE_URL)
 npm run build          # 운영 빌드
 npm run check:bundle   # 빌드 결과에 비밀키·Mock 코드가 없는지 검사
 npm run check:config   # 현재 환경변수가 기동 규칙을 통과하는지 검사

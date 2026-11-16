@@ -26,3 +26,35 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run check:bundle
+
+  # Step 2: schema contract tests (TEST_PLAN §2: MIG-01..08) against a REAL PostgreSQL 16 server.
+  # Separate job so the Step 1 `check` job keeps running without a database.
+  db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NAZIR_RUNTIME_ENV: test
+      # The tests create and drop throwaway nazir_ct_*_test databases next to this one.
+      TEST_DATABASE_URL: postgresql://nazir:nazir@localhost:5432/nazir_test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nazir
+          POSTGRES_PASSWORD: nazir
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nazir"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma validate
+      - run: npm run test:db
