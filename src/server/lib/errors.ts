@@ -1,0 +1,67 @@
+/**
+ * Domain error catalog (API_SPEC.md §2.1). Route handlers convert AppError to the
+ * common error body `{ error: { code, message, details } }`.
+ */
+export const ERROR_STATUS = {
+  VALIDATION_FAILED: 400,
+  IDEMPOTENCY_KEY_INVALID: 400,
+  IDENTITY_SESSION_REQUIRED: 401,
+  BROWSER_BINDING_MISMATCH: 401,
+  CSRF_REJECTED: 403,
+  SESSION_PURPOSE_MISMATCH: 403,
+  ORDER_ACCESS_DENIED: 403,
+  NOT_FOUND: 404,
+  SEAT_UNAVAILABLE: 409,
+  ACTIVE_ORDER_EXISTS: 409,
+  PAYMENT_IN_PROGRESS: 409,
+  INVALID_STATE_TRANSITION: 409,
+  IDEMPOTENCY_KEY_REUSED: 409,
+  REQUEST_IN_PROGRESS: 409,
+  PURCHASE_LIMIT_EXCEEDED: 422,
+  SALES_NOT_OPEN: 422,
+  HOLD_EXPIRED: 422,
+  HOLD_TIME_INSUFFICIENT: 422,
+  PAYMENT_METHOD_NOT_ALLOWED: 422,
+  PAYMENT_METHOD_UNAVAILABLE: 422,
+  IDENTITY_VERIFICATION_FAILED: 422,
+  IDENTITY_SESSION_TIME_INSUFFICIENT: 422,
+  ORDER_CREATION_LIMITED: 429,
+  RATE_LIMITED: 429,
+  INTERNAL_ERROR: 500,
+  PROVIDER_UNAVAILABLE: 503,
+} as const;
+
+export type ErrorCode = keyof typeof ERROR_STATUS;
+
+export class AppError extends Error {
+  readonly code: ErrorCode;
+  readonly status: number;
+  readonly details: Record<string, unknown>;
+  constructor(code: ErrorCode, message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "AppError";
+    this.code = code;
+    this.status = ERROR_STATUS[code];
+    this.details = details;
+  }
+}
+
+export interface ErrorBody {
+  error: { code: ErrorCode; message: string; details: Record<string, unknown> };
+}
+
+/** Never leaks internal error text for non-AppError failures. */
+export function toErrorResponse(err: unknown): { status: number; body: ErrorBody } {
+  if (err instanceof AppError) {
+    return {
+      status: err.status,
+      body: { error: { code: err.code, message: err.message, details: err.details } },
+    };
+  }
+  return {
+    status: 500,
+    body: {
+      error: { code: "INTERNAL_ERROR", message: "일시적인 오류가 발생했습니다.", details: {} },
+    },
+  };
+}

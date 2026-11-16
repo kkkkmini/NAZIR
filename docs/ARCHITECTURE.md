@@ -306,7 +306,7 @@ Mock은 서버 전용 모듈이며 클라이언트 번들에 포함하지 않는
 |---|---|---|---|---|
 | local | MOCK 또는 SANDBOX(토스 `test_` 키) | MOCK | `api.tosspayments.com`(sandbox 사용 시) | 개발자 개인 테스트 키 |
 | test(CI) | MOCK | MOCK | 없음 | 외부 호출 금지 |
-| staging | SANDBOX(토스 `test_` 키) | SANDBOX 불가 → MOCK 또는 NICE 실인증(Q-019) | `api.tosspayments.com`, `auth.niceid.co.kr`, `nice.checkplus.co.kr` | 카드사 심사용 공개 사이트로도 쓸 수 있음(E-008) |
+| staging | SANDBOX(토스 `test_` 키) | NICE 실인증만(계약·IP 등록 후, Q-019). **Mock 금지(A-024)** | `api.tosspayments.com`, `auth.niceid.co.kr`, `nice.checkplus.co.kr` | 카드사 심사용 공개 사이트로도 쓸 수 있음(E-008) |
 | production | LIVE(`live_` 키) | LIVE(NICE) | 위와 같음 + NICE 등록 Outbound IP | Mock 기동 불가(§6.5) |
 
 - **NICE Outbound IP 등록이 선행 조건**이다(원문). 호스팅에서 고정 출구 IP를 제공하지 못하면 NICE 호출만 고정 IP 프록시를 거치게 하는 방안을 검토한다(Q-020, 미확인).

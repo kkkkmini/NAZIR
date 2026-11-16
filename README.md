@@ -1,1 +1,36 @@
 # NAZIR
+
+뮤지컬·연극 티켓 예매 웹사이트. 설계 문서는 [`docs/`](docs/) — 시작점은 [`docs/CLAUDE_HANDOFF.md`](docs/CLAUDE_HANDOFF.md), 결정 사항은 [`docs/DECISIONS.md`](docs/DECISIONS.md).
+
+## 요구 사항
+
+- Node.js 22 이상
+- (Step 2부터) PostgreSQL 15 이상
+
+## 로컬 실행
+
+```bash
+npm ci
+cp .env.example .env.local   # 기본값: local 환경, Mock 결제·인증
+npm run dev                  # http://localhost:3000
+```
+
+상태 확인: `GET http://localhost:3000/api/v1/health` (비밀값 없는 실행 환경·Provider 단계 정보)
+
+## 검사
+
+```bash
+npm run check          # lint + typecheck + 단위 테스트
+npm run build          # 운영 빌드
+npm run check:bundle   # 빌드 결과에 비밀키·Mock 코드가 없는지 검사
+npm run check:config   # 현재 환경변수가 기동 규칙을 통과하는지 검사
+```
+
+## 운영 안전장치
+
+서버는 시작할 때 설정을 검사하고, 위반하면 **기동하지 않고 종료**합니다(`src/instrumentation.ts`).
+
+- `NAZIR_RUNTIME_ENV`가 없거나 알 수 없는 값이면 `production`으로 간주합니다.
+- `production`에서는 Mock 결제·Mock 인증, 토스 `test_` 키를 사용할 수 없습니다.
+- 토스 `live_` 키는 `production`에서만 사용할 수 있습니다.
+- 비밀값(토스 시크릿·보안 키, NICE client 정보)은 서버 환경변수로만 주입하고 저장소에 커밋하지 않습니다.
