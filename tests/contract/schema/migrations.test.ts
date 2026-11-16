@@ -139,6 +139,25 @@ describe("MIG-02..05, MIG-07 contract on the migrated database", () => {
   });
 });
 
+describe("DB_CONSTRAINT names used for domain-error mapping exist in the database", () => {
+  let db: TestDb;
+  beforeAll(async () => {
+    db = await cloneTestDb(server, inject("templateDb"));
+  });
+  afterAll(() => destroyTestDb(db));
+
+  it("each name is an index, a constraint, or a name raised by a constraint-trigger function", async () => {
+    const { DB_CONSTRAINT } = await import("../../../src/server/db/constants");
+    const { rows } = await db.query<{ n: string }>(`
+      SELECT relname::text AS n FROM pg_class WHERE relnamespace = 'public'::regnamespace
+      UNION SELECT conname::text FROM pg_constraint WHERE connamespace = 'public'::regnamespace
+      UNION SELECT (regexp_matches(prosrc, 'CONSTRAINT = ''([a-z_]+)''', 'g'))[1] FROM pg_proc WHERE pronamespace = 'public'::regnamespace`);
+    const have = new Set(rows.map((r) => r.n));
+    const missing = Object.entries(DB_CONSTRAINT).filter(([, name]) => !have.has(name));
+    expect(missing).toEqual([]);
+  });
+});
+
 describe("negative controls: the checkers fail on a sabotaged database", () => {
   let db: TestDb;
   beforeAll(async () => {
@@ -227,7 +246,13 @@ describe("MIG-06 later migrations must not drop raw-SQL objects", () => {
       [`ALTER TABLE "payments" DROP CONSTRAINT "payments_refunded_amount_ck";`, "payments_refunded_amount_ck"],
       [`ALTER TABLE "orders" DROP CONSTRAINT IF EXISTS "orders_confirmed_payment_fk";`, "orders_confirmed_payment_fk"],
       [`DROP TRIGGER "order_items_no_update" ON "order_items";`, "order_items_no_update"],
-      [`DROP FUNCTION order_items_reject_update();`, "order_items_reject_update"],
+      [`DROP FUNCTION order_items_reject_change();`, "order_items_reject_change"],
+      [`DROP TRIGGER "order_items_no_delete" ON "order_items";`, "order_items_no_delete"],
+      [`DROP TRIGGER payments_primary_guard ON payments;`, "payments_primary_guard"],
+      [`DROP FUNCTION orders_check_confirmed_payment();`, "orders_check_confirmed_payment"],
+      [`DROP INDEX "payments_primary_order_uq";`, "payments_primary_order_uq"],
+      [`ALTER TABLE "orders" DROP CONSTRAINT "orders_quota_fk";`, "orders_quota_fk"],
+      [`ALTER TABLE "payments" DROP CONSTRAINT "payments_order_total_fk";`, "payments_order_total_fk"],
       [`DROP TABLE "tickets";`, "tickets"],
       [`ALTER TABLE "seat_holds" DROP COLUMN "status";`, "seat_holds.status"],
       [`ALTER TABLE "orders" ADD COLUMN x int, DROP COLUMN "confirmed_payment_id";`, "orders.confirmed_payment_id"],

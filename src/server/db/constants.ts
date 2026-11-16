@@ -50,7 +50,14 @@ export const PAYMENT_STATUS = ["READY", "CONFIRMING", "UNKNOWN", "SUCCEEDED", "F
 /** In-flight payment = at most one per order (partial unique on payments). */
 export const IN_PROGRESS_PAYMENT_STATUS = ["READY", "CONFIRMING", "UNKNOWN"] as const;
 export const PAYMENT_ROLE = ["PRIMARY", "EXCESS"] as const;
-export const PAYMENT_METHOD_TYPE = ["CARD", "EASY_PAY"] as const;
+/**
+ * Stored value of payments.method_type (Q-022). While a payment is READY/CONFIRMING/UNKNOWN it is the method the
+ * USER REQUESTED (always one of PAYMENT_REQUEST_METHOD_TYPE). When the PG reports that an APPROVED payment used
+ * something else, the adapter sets OTHER; the DB only allows OTHER together with status SUCCEEDED + role EXCESS.
+ */
+export const PAYMENT_METHOD_TYPE = ["CARD", "EASY_PAY", "OTHER"] as const;
+/** Methods a server may create a payment with (D-005, D-011). Never OTHER. */
+export const PAYMENT_REQUEST_METHOD_TYPE = ["CARD", "EASY_PAY"] as const;
 export const WEBHOOK_EVENT_STATUS = ["RECEIVED", "PROCESSING", "PROCESSED", "FAILED", "IGNORED", "UNMATCHED"] as const;
 
 export const REFUND_TYPE = ["SEAT", "PAYMENT_EXCESS"] as const;
@@ -95,6 +102,20 @@ export const DB_CONSTRAINT = {
   inProgressPaymentUnique: "payments_in_progress_order_uq",
   validTicketUnique: "tickets_valid_seat_uq",
   openReviewCaseUnique: "review_cases_open_dedupe_uq",
+  primaryPaymentUnique: "payments_primary_order_uq",
+  /** FK: an order needs its purchase_quotas row (S4). */
+  orderQuotaFk: "orders_quota_fk",
+  /** FK: payments.requested_amount must equal orders.total_amount (S3). */
+  paymentOrderTotalFk: "payments_order_total_fk",
+  paymentPrimaryAmountCheck: "payments_primary_amount_ck",
+  paymentMethodOtherCheck: "payments_method_type_other_ck",
+  /** FK: identity session = its verification's subject and purpose (Q-024). */
+  identitySessionVerificationFk: "identity_sessions_verification_subject_purpose_fk",
+  /** Deferred constraint-trigger errors (raised at COMMIT with SQLSTATE 23514). */
+  confirmedPaymentNotPrimary: "orders_confirmed_payment_primary_ck",
+  confirmedPaymentDetached: "orders_confirmed_payment_detach_ck",
+  primaryPaymentNotConfirmed: "payments_primary_confirmed_ck",
+  confirmedPaymentDemoted: "payments_confirmed_must_be_primary_ck",
   quotaCountedSeatsCheck: "purchase_quotas_counted_seats_ck",
   refundedAmountCheck: "payments_refunded_amount_ck",
 } as const;

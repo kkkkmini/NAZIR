@@ -53,7 +53,7 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 0 | 문서/저장소 조사, 독립 기술 검토 | BLOCKER/HIGH 보고 | 완료 |
 | 0.5 | 검토 반영 문서 개정(v1.1 → v1.2), `DECISIONS.md`, `PROVIDERS.md` | 문서 교차 일치, **사용자 승인** | 진행 중 |
 | 1 | Next.js/TS 기반, lint/typecheck/test/build, env schema, CI, Clock 인터페이스, 오류 체계, **Provider 단계 설정·fail-closed 기동 검사**(ARCH §6.5), Secret 로딩 | clean clone에서 README대로 실행, CI 통과, PRV-01~05 통과 | 없음 |
-| 2 | Prisma schema + raw SQL migration(제약 전체, `UNFULFILLED`, `provider_context_encrypted`, `card_company`), seed(임시 좌석), **스키마 계약 테스트** | 빈 PostgreSQL migration 성공, MIG-* 통과 | v1.2 승인(Q-004는 D-014로 해소). **구현 완료·승인 대기**(2026-11-16): `DATABASE.md` §19, 미결정 Q-022~Q-026 |
+| 2 | Prisma schema + raw SQL migration(제약 전체, `UNFULFILLED`, `provider_context_encrypted`, `card_company`), seed(임시 좌석), **스키마 계약 테스트** | 빈 PostgreSQL migration 성공, MIG-* 통과 | v1.2 승인(Q-004는 D-014로 해소). **구현·보완 완료, main 병합 승인 대기**(2026-11-16): `DATABASE.md` §19, 결정 A-032~A-037·D1~D8(`DECISIONS.md`). 후속 이월 항목은 §4.1 |
 | 3 | 공연/회차/좌석 조회, 판매 가능 조건, 임시 seat map, **카드사 심사용 공개 페이지**(상품·약관·환불규정·사업자정보 자리) | DB 상태와 UI 일치 | E-003(실제 좌석은 자료 수령 후), E-008 |
 | 4 | identity: 바인딩·CSRF bootstrap, 인증 시작·콜백·claim, 인증 세션(고정 30분·잔여 10분·주문 생성 제한), subject HMAC, **Mock IdentityProvider**, NICE adapter 골격(원문 기준, 실호출 전) | IDV-* 통과(Mock), NIC-01~04(Mock 시나리오) | Q-002(식별값 — 설정 가능하게) |
 | 5 | booking: 주문 생성(한도 잠금·READ COMMITTED·잠금 후 판단·활성 주문·다중 점유), `expireOrder`, 취소 후 재예매, 소유 주체 Idempotency, 접근 세션, rate limit | SEAT-*, ORD-*, QTA-* 통과 | Q-011, Q-013(설정값) |
@@ -62,6 +62,20 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 8 | admin: 로그인·세션·권한·감사 로그, 주문/좌석/결제 조회, 좌석 차단, review case action(`RELEASE_SEATS` → `UNFULFILLED` 포함), 환불 요청·PG 실행 기록·취소 후보 제시·검증·완료, 결제수단 활성화 설정 | ADM-*, REF-*, QTA-22~25 통과, DB 직접 수정 없이 복구 | Q-005, Q-012, Q-015 |
 | 9 | Outbox worker/Sheets upsert/retry/dead-letter(P1), 정합성 검사(Mock 레코드 탐지 포함), PG 일일 대사 | OUT-*, OPS-*, PRV-06 통과 | Q-014, E-011 |
 | 10 | **NICE 실연동**(토큰·URL·결과·복호화), 토스 라이브 키 전환, 통합·보안·부하·배포·백업 리허설, 운영 리허설 | P0 전부 통과 + Go 승인 | E-001(NICE 계약·IP 등록·통신사 심사), E-002(토스 계약·카드사 심사), E-007, Q-019, Q-020 |
+
+### 4.1 Step 간 이월 점검 사항 (Step 2 기술 검토 결과, 2026-11-16)
+
+Step 2에서 DB가 보장하는 범위와 **보장하지 않아 이후 Step이 책임져야 하는 범위**를 정리했다. 항목 이름 S1~S10은 Step 2 기술 검토의 번호이며, S1·S3·S4는 Step 2에서 해결했다(`DECISIONS.md` A-032·A-033·A-037).
+
+| 항목 | 내용 | 반영 Step | 완료 조건 |
+|---|---|---|---|
+| S2 | `SOLD` 좌석과 live hold의 교차 정합성은 DB가 막지 않는다. Step 5의 주문 생성이 `SELECT … FOR UPDATE`로 좌석을 잠그고 `AVAILABLE`을 확인한 뒤에만 hold를 만든다. **착수 전 DB 방어(constraint trigger) 가능성 재검토** | **Step 5** | SEAT 테스트 `SOLD` 변형·INV-9 통과 |
+| S7 | Prisma 오류 코드·제약 이름 매핑 검증: 트리거 `23001`→`P2003` 위장, 제약 이름은 `meta.driverAdapterError.cause`, 지연 constraint trigger 오류는 **COMMIT에서** 발생(`23514`) | **Step 5 착수 전** | 모든 `DB_CONSTRAINT`가 의도한 도메인 오류로 변환됨 |
+| S10 | partial unique를 대상으로 한 `INSERT … ON CONFLICT`는 predicate를 명시, 쿼터 행 확보(`INSERT … ON CONFLICT DO NOTHING` + `FOR UPDATE`)는 주문 INSERT보다 먼저(`orders_quota_fk`), raw SQL UPDATE는 `updated_at` 명시 갱신(D3), 쓰기는 READ COMMITTED·§13.2 잠금 순서 | **Step 5** 구현 지침 | 코드 리뷰 체크리스트 + 통합 테스트 |
+| Q-025 | 주문번호 전역 sequence 형식(월 표기·자릿수·검증 문자) 확정, 그 후 sequence 생성 migration | **Step 5 시작 전** | `order_number` 생성기 구현 |
+| S5 | 종료 주문의 live hold, 미판매 좌석의 티켓 → 정합성 검사와 review case | **Step 9** | INV-10 검사·경보 |
+| S8 | MIG-06 검사기 개선(`DROP`+같은 이름 `ADD` 허용, 진짜 제거는 계속 검출) | 별도 테스트 개선(Step 3 이전 가능) | 합성 케이스 통과 |
+| S9 | DB 운영 타임아웃, TLS 강제, DB 역할 분리(앱 역할에서 원장 테이블의 UPDATE/DELETE/TRUNCATE 제거, migration 역할 분리), 커넥션 풀러와 지연 constraint 검사 호환성 | **Step 10** | 리허설·인프라 검증 |
 
 ## 5. 외부 업체 지연과 일정 [권장 — 사용자 확정 아님, 판매 개시 조건만 확정 D-012·D-013]
 
@@ -161,3 +175,4 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 1.1 | 2026-11-14 | 파일명 `IMPLEMENTATION_PLAN.md`로 정정. P0/P1 재정의(환불 기록·검증, 감사 로그, review case, outbox 생성을 P0로), Step 0.5 문서 개정 단계와 단계별 선행 결정 추가, 인증 선행·한도·결제 펜싱 단계 반영, 좌석 변경 제거, 일정 게이트(권장) 추가, 금지 사항 확장 |
 | 1.2 | 2026-11-15 | 토스페이먼츠·NICE아이디 확정 반영. 개발 원칙에 외부 승인과 독립된 진행·운영 Mock 차단·원문 기준 구현 추가. 단계표에 기동 검사(Step 1), 심사용 공개 페이지(Step 3), NICE adapter 골격(Step 4), 토스 Sandbox(Step 6), NICE 실연동(Step 10) 반영. §5를 진행/대기 작업, 외부 업체 트랙, 개발 로드맵, 실판매 개시 조건(D-012, D-013), 일정 판단으로 교체. 저장소 구조·금지 사항 갱신. 이전 원문: `docs/archive/v1.1/IMPLEMENTATION_PLAN.md` |
 | 1.2.1 | 2026-11-16 | Step 2 구현 상태 표기(단계표). 계획·일정은 변경 없음 |
+| 1.2.2 | 2026-11-16 | §4.1 Step 간 이월 점검 사항 추가, Step 2 상태 갱신. 단계·일정은 변경 없음 |

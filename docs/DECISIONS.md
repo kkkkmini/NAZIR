@@ -85,6 +85,27 @@
 | A-029 | **구매 쿼터 동시성**: 쿼터를 잠그는 모든 트랜잭션은 READ COMMITTED. 한도·활성 주문 판정은 잠금 획득 **이후** 실행한 statement 결과로만 한다. `seat_limit`은 행 생성 시 snapshot이며 이후 회차 한도 변경은 기존 행에 반영하지 않는다. | 검증 항목 1 |
 | A-030 | **결제수단 허용 목록 적용**: (1) 서버가 활성화된 수단만 결제수단 목록 API로 제공, (2) 카드는 통합결제창 + 승인 완료 카드사만 `cardCompany`로 지정, 간편결제는 `DIRECT` + `easyPay`로 개별 호출, (3) 승인 응답의 수단·카드사·간편결제사가 허용 목록 밖이면 자동 확정 금지(`role = EXCESS` + review case). 통합결제창의 간편결제 노출 제어는 미확인(Q-021). | D-011, D-012 |
 | A-031 | **confirm timeout과 3분 보호의 관계**: confirm 호출 timeout은 설정값(초기 60초 — 토스 일반 승인 권장치는 검색만 확인, PROVIDERS §1.8). 3분 보호 안에서 "confirm(멱등키) → 불명확 시 orderId 조회 → `IN_PROGRESS`이고 인증 후 10분 이내면 같은 멱등키로 confirm 재시도"를 반복한다. 3분 경과 시 UNKNOWN으로 전환하되 **좌석은 해제하지 않으며**, 이후 재조회로 `DONE`이면 확정, `EXPIRED`/`ABORTED`이면 실패 확정. | B1, 사용자 지침 4 |
+| A-032 | **결제·주문 정합성을 DB가 보장한다(S3).** 주문당 `PRIMARY` 결제 ≤ 1(partial unique, `EXCESS`는 여러 건), `PRIMARY` 승인 금액 = 요청 금액 = 주문 총액(CHECK + 복합 FK `payments(order_id, requested_amount)` → `orders(id, total_amount)`), 확정 결제는 그 주문의 `SUCCEEDED` `PRIMARY` 결제이며 `PRIMARY` ⇔ 주문의 확정 결제(DEFERRABLE INITIALLY DEFERRED constraint trigger 2개: 커밋 시점 최종 상태 검사, 어떤 문장 순서로도 원자적 판매 확정 허용). A-004·A-005의 구현 강화이며 결제 이력 보존 원칙은 유지. **사용자 승인 2026-11-16.** | Step 2 기술 검토 S3 |
+| A-033 | **주문은 자기 주체·회차의 `purchase_quotas` 행 없이 존재할 수 없다(S4).** 복합 FK `orders(identity_subject_id, show_session_id)` → `purchase_quotas`. A-011(쿼터 행 잠금)의 DB 방어 강화. **사용자 승인 2026-11-16.** | Step 2 기술 검토 S4 |
+| A-034 | **`payments.method_type`에 `OTHER` 추가(Q-022 확정).** 결제 시도 생성 시에는 사용자가 요청한 수단(`CARD`/`EASY_PAY`), PG가 승인된 결제를 허용 외 수단으로 보고하면 `OTHER`로 기록한다. `OTHER`는 `SUCCEEDED` + `EXCESS`에서만 허용(진행 중·실패·취소·`PRIMARY` 불가). 허용 외 카드사·간편결제사는 `card_company`·`easy_pay_provider`에 사실대로 기록(허용 값 CHECK 없음). A-030의 검증·초과 결제 보존 원칙은 유지. **사용자 승인 2026-11-16.** | Q-022 |
+| A-035 | **인증 세션은 원 인증의 주체·용도를 그대로 가진다(Q-024 확정).** `identity_verifications UNIQUE (id, identity_subject_id, purpose)` + `identity_sessions` 복합 FK. 인증 1건 → 세션 1개 규칙은 유지. A-008·A-009의 DB 방어 강화. **사용자 승인 2026-11-16.** | Q-024 |
+| A-036 | **`order_items`는 UPDATE와 DELETE 모두 DB에서 차단한다(Q-023 확정).** A-006의 구현. 개인정보 파기·보관기간 만료는 이 원장을 임의 삭제하는 방식이 아니라 별도 정책·권한으로 다룬다(Q-016). **사용자 승인 2026-11-16.** | Q-023 |
+| A-037 | **모든 DB migration은 트랜잭션(`BEGIN; … COMMIT;`)으로 실행한다(S1).** Prisma Migrate가 migration을 트랜잭션으로 실행하지 않음을 실측으로 확인(중간 실패 시 앞 문장이 남고 이후 배포가 `P3009`로 막힘). 트랜잭션 불가 문장은 별도 migration + `-- no-transaction:` 표지. A-019의 구현 강화. **사용자 승인 2026-11-16.** | Step 2 기술 검토 S1 |
+
+### 2.1 Step 2 구현 결정 D1~D8 [채택 — 사용자 승인 2026-11-16]
+
+`D1~D8`은 Step 2 구현 중 구현자가 고른 사항을 사용자가 확정한 것이며, 확정 정책 `D-001~D-015`와는 별개의 이름 공간이다. 구현 위치는 `DATABASE.md` §19.6. `S1~S10`은 Step 2 기술 검토(2026-11-16)의 항목 번호이며 정의와 후속 Step 배정은 `IMPLEMENTATION_PLAN.md` §4.1.
+
+| ID | 결정 |
+|---|---|
+| D1 | `seat_status_logs (session_seat_id, created_at)` 인덱스 승인 |
+| D2 | `purchase_quotas.version` 기본값 0 승인 |
+| D3 | `created_at`은 DB 기본값(`CURRENT_TIMESTAMP`) 유지, `updated_at`은 Prisma `@updatedAt` 방식 유지. raw SQL UPDATE는 `updated_at`을 명시 갱신. 일괄 timestamp 트리거 없음(Q-026 확정). 실측: Prisma Client 쓰기는 `created_at`·`updated_at`을 앱 시각으로 명시 전송, raw SQL은 DB 기본값(트랜잭션 시작 시각) — `DATABASE.md` §19.5 |
+| D4 | `easy_pay_provider`·`card_company`에 허용 값 CHECK를 두지 않는다 |
+| D5 | 문서에 NOT NULL이 명시된 컬럼은 NOT NULL, 그 외는 기본 nullable. 단 `outbox_events.payload`는 NOT NULL 유지 |
+| D6 | 로그의 `from_status`·`to_status`에 어휘 CHECK를 두지 않는다 |
+| D7 | `order_items` UPDATE·DELETE 모두 차단(Q-023, A-036) |
+| D8 | Step 2에서 주문번호 sequence를 만들지 않는다. Step 5에서 전역 sequence 방식으로 결정(Q-025) |
 
 ---
 
@@ -233,34 +254,34 @@
 - **선택지:** (a) `method_type` CHECK를 `CARD`/`EASY_PAY`/`OTHER`(또는 `DISALLOWED`)로 확장하고 `OTHER`는 항상 `role = EXCESS`로 제한하는 추가 CHECK, (b) `method_type`을 nullable로 하고 허용 외는 NULL + `review_cases.detail`에 원문 수단 기록, (c) 현행 CHECK 유지하고 허용 외 승인은 가장 가까운 값으로 강제 매핑(권장하지 않음: 사실 왜곡).
 - **영향:** `payments_method_type_ck`, `easy_pay_provider`/`card_company` 허용 값 CHECK 여부(현재 없음), Step 6 결제 확정 경로, TEST PAY-17·PAY-26.
 - **권장:** (a). 승인된 결제를 DB에 기록하지 못하는 경로를 없애는 것이 환불 추적에 필수다.
-- **결정 담당:** 사용자. **기한:** Step 6 착수 전. **상태:** 미결정. 현재 구현은 문서 그대로(`CARD`/`EASY_PAY`만 허용).
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-16, A-034).** `method_type`에 `OTHER` 추가, 승인된 허용 외 결제는 `role = EXCESS`로 기록하고 `review_cases(DISALLOWED_METHOD)`를 연다. 생성 시 값(사용자가 요청한 `CARD`/`EASY_PAY`)과 PG 승인 응답에서 확인된 값을 구분한다: `OTHER`는 `SUCCEEDED` + `EXCESS`에서만 허용되고 진행 중·실패·취소·`PRIMARY`는 DB가 거부한다. 요청 수단은 `review_cases.detail`에 남긴다. 구현: `DATABASE.md` §7.1, `payments_method_type_ck`·`payments_method_type_other_ck`.
 
 ### Q-023. `order_items` 삭제 차단 범위 (Step 2)
 - **질문:** §5.2는 "생성 후 UPDATE·DELETE하지 않는다"고 하면서 DB 보호로는 UPDATE 차단 트리거만 언급한다. 현재 UPDATE는 트리거로, 다른 테이블이 참조하는 항목의 DELETE는 `ON DELETE RESTRICT`로 막히지만 **참조되지 않는 항목의 DELETE는 허용**된다(주문 생성 트랜잭션 롤백 외에는 필요 없음).
 - **선택지:** (a) 현행 유지, (b) DELETE도 트리거로 차단(주문 생성 롤백은 트랜잭션 취소이므로 영향 없음. 단 향후 개인정보 파기·보관기간 작업이 항목을 지워야 하면 우회 절차 필요).
 - **영향:** DATABASE §5.2, TEST ORD-17, Q-016(보관·파기).
-- **결정 담당:** 사용자(보관·파기 정책과 함께). **상태:** 미결정, 현행 (a).
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-16, A-036).** (b) 선택 — UPDATE와 DELETE 모두 차단. 향후 개인정보 파기·보관기간 만료는 이 원장을 임의 삭제하는 방식이 아니라 별도 정책·권한으로 다룬다(Q-016). 구현: `order_items_no_update`·`order_items_no_delete`.
 
 ### Q-024. 인증 세션과 원 인증 거래의 주체·용도 일치를 DB가 보장하지 않음 (Step 2)
 - **질문:** `identity_sessions.identity_subject_id`/`purpose`가 연결된 `identity_verifications`와 같아야 한다는 규칙(§6.3 "claim 트랜잭션에서 검증")은 서비스 검증에만 의존한다. 규칙 12(주문↔인증 세션 주체 일치)는 DB가 보장하지만 이 한 단계 위는 아니다.
 - **선택지:** (a) 현행(서비스 검증), (b) `identity_verifications`에 `UNIQUE (id, identity_subject_id, purpose)`를 두고 `identity_sessions (identity_verification_id, identity_subject_id, purpose)` 복합 FK 추가.
 - **영향:** 제약 2개 추가(컬럼·테이블 추가 없음), Step 4 claim 트랜잭션, MIG-04 목록.
 - **권장:** (b). 한도·활성 주문의 기준인 `identity_subject_id`가 잘못 연결되는 사고를 DB가 막는다. 설계 변경이므로 사용자 승인 필요.
-- **결정 담당:** 사용자. **기한:** Step 4 착수 전. **상태:** 미결정.
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-16, A-035).** (b) 선택 — 복합 UNIQUE + 복합 FK로 DB가 강제. 인증 세션 1건당 원 인증 1건 규칙 유지. 구현: `identity_verifications_id_subject_purpose_uq`, `identity_sessions_verification_subject_purpose_fk`.
 
 ### Q-025. 주문번호 형식과 DB sequence (Step 2에서 보류)
 - **질문:** §5.1은 `NZ-202611-000001` 예시와 "DB sequence 기반 생성"을 말하지만 월별 리셋 여부·자릿수·동시성(sequence는 롤백 시 번호가 비는 것을 허용) 정책이 없다.
 - **선택지:** (a) 전역 단일 sequence + 월 표기만 포맷, (b) 월별 카운터 테이블(번호 연속, 잠금 필요), (c) 전역 sequence 번호 + 난수 검증 문자.
 - **영향:** `orders.order_number`(UNIQUE는 구현됨), Step 5 주문 생성, 고객 문의 처리(번호 공개).
 - **권장:** (a). 번호 결번을 허용하고 락 경합을 피한다.
-- **결정 담당:** 사용자. **기한:** Step 5 착수 전. **상태:** 미결정(sequence는 아직 만들지 않음).
+- **결정 담당:** 사용자. **기한:** Step 5 착수 전. **상태:** **방향 승인(2026-11-16, D8)**: 전역 sequence 방식. Step 2에서는 sequence를 만들지 않는다. 형식(월 표기·자릿수)·검증 문자 여부는 Step 5 시작 전에 확정한다.
 
 ### Q-026. `updated_at` 자동 갱신 방식 (Step 2)
 - **질문:** 현재 `updated_at`은 Prisma Client(`@updatedAt`)만 갱신한다. Step 5 이후 잠금 쿼리를 raw SQL로 쓰면 서비스가 직접 갱신해야 하고 누락될 수 있다.
 - **선택지:** (a) 현행 + 코드 리뷰 규칙, (b) 공용 `BEFORE UPDATE` 트리거로 `updated_at = now()` 강제(`order_items`는 해당 없음).
 - **영향:** 모든 `updated_at` 보유 테이블(트리거 19개), Sheets outbox의 `aggregate_version`과는 별개.
 - **권장:** (b)는 마이그레이션 1개로 해결되나 설계 문서에 없는 DB 객체 추가이므로 승인 후 도입.
-- **결정 담당:** 사용자. **기한:** Step 5 착수 전. **상태:** 미결정, 현행 (a).
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-16, D3).** (a) 현행 유지 — `created_at`은 DB 기본값, `updated_at`은 Prisma `@updatedAt`, raw SQL UPDATE는 `updated_at`을 명시 갱신, 일괄 트리거 없음. 이전 보고의 "`created_at`도 앱 시각" 설명은 실측으로 **Prisma Client 쓰기에 한해 사실**임을 확인했다(`DATABASE.md` §19.5, 테스트 DB-02). raw SQL이 생략하면 DB 시각(트랜잭션 시작 시각)이다.
 
 ---
 
@@ -304,3 +325,4 @@
 | 1.1 | 2026-11-14 | 신규 작성. 사용자 확정 정책 D-001~D-008, 기술 검토 반영 채택안 A-001~A-023, 미결정 Q-001~Q-016, 외부 확인 E-001~E-011 기록 |
 | 1.2 | 2026-11-15 | 확정 D-009~D-015(토스·NICE, 결제창 API 개별 연동, 1차 결제수단, 판매 개시 조건, NICE 지연 시 연기·Mock 판매 금지, 활성 주문 범위·UNFULFILLED, 인증 세션 규칙). 채택안 A-024~A-031(Provider 단계·fail-closed, 단계 DB 미저장, Mock 빌드 제거 비필수, 웹훅 처리, 거래별 문맥·Secret 분리, 쿼터 격리·잠금 후 판단, 결제수단 허용 목록, confirm timeout과 3분 보호). Q-001~Q-005·Q-013 갱신, Q-017~Q-021 신설, E-001·E-002·E-007·E-008 원문 확인 결과 반영. 이전 원문: `docs/archive/v1.1/DECISIONS.md` |
 | 1.2.1 | 2026-11-16 | Step 2 구현 중 발견한 문서 충돌·공백 Q-022~Q-026 추가(확정·채택 항목은 변경 없음). 상세는 `DATABASE.md` §19.6~§19.7 |
+| 1.2.2 | 2026-11-16 | Step 2 보완 결정 반영: A-032~A-037 신설(결제·주문 정합성, 주문↔쿼터 FK, `OTHER` 결제수단, 인증 세션 복합 FK, `order_items` DELETE 차단, migration 트랜잭션), D1~D8 확정(§2.1), Q-022~Q-024·Q-026 확정, Q-025 방향 승인. A-001~A-031, D-001~D-015는 변경 없음 |

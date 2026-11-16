@@ -10,8 +10,10 @@
  *    drops databases matching that pattern.
  */
 import { spawn } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { parseDatabaseUrl, TEST_DB_SUFFIX } from "../../../../src/server/config/database-config";
@@ -153,12 +155,19 @@ export class TestDb {
     return this.pool.query<R>(text, values);
   }
 
-  /** Runs `fn` inside a transaction that is ALWAYS rolled back — fixtures never leak between tests. */
+  /**
+   * Runs `fn` inside a transaction that is ALWAYS rolled back — fixtures never leak between tests.
+   * Before rolling back, the deferred (commit-time) constraints are forced to run: a test that leaves the database in a
+   * state COMMIT would reject (e.g. a PRIMARY payment its order does not confirm) therefore fails instead of passing
+   * silently.
+   */
   async rolledBack<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {
     const c = await this.pool.connect();
     try {
       await c.query("BEGIN");
-      return await fn(c);
+      const result = await fn(c);
+      await c.query("SET CONSTRAINTS ALL IMMEDIATE");
+      return result;
     } finally {
       try {
         await c.query("ROLLBACK");
@@ -183,4 +192,44 @@ export async function cloneTestDb(server: TestServer, templateName: string): Pro
 export async function destroyTestDb(db: TestDb): Promise<void> {
   await db.close();
   await dropDatabase(db.server, db.name);
+}
+
+/**
+ * A throwaway Prisma project (schema + a COPY of the real migrations + a minimal config) so that tests can break a
+ * migration on purpose and run the real `prisma migrate` CLI against it without touching the repository.
+ */
+export interface TempMigrationProject {
+  dir: string;
+  migrationFile(name: string): string;
+  read(name: string): string;
+  write(name: string, sql: string): void;
+  run(args: string[], databaseUrl: string): Promise<CliResult>;
+  cleanup(): void;
+}
+
+export function makeTempMigrationProject(): TempMigrationProject {
+  const dir = mkdtempSync(join(tmpdir(), "nazir-migproj-"));
+  mkdirSync(join(dir, "prisma"), { recursive: true });
+  cpSync(SCHEMA_PATH, join(dir, "prisma/schema.prisma"));
+  cpSync(MIGRATIONS_DIR, join(dir, "prisma/migrations"), { recursive: true });
+  writeFileSync(
+    join(dir, "prisma.config.ts"),
+    `import { defineConfig } from "prisma/config";
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: { path: "prisma/migrations" },
+  datasource: { url: process.env.DATABASE_URL ?? "" },
+});
+`,
+  );
+  symlinkSync(resolve(REPO_ROOT, "node_modules"), join(dir, "node_modules"), "dir");
+  const file = (name: string) => join(dir, "prisma/migrations", name, "migration.sql");
+  return {
+    dir,
+    migrationFile: file,
+    read: (name) => readFileSync(file(name), "utf8"),
+    write: (name, sql) => writeFileSync(file(name), sql),
+    run: (args, databaseUrl) => runPrisma(args, { databaseUrl, cwd: dir }),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }

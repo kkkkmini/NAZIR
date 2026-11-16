@@ -7,7 +7,8 @@ import {
   BIGINT_COLUMNS,
   CHECKS,
   COMPOSITE_FKS,
-  IMMUTABLE_TRIGGER,
+  CONSTRAINT_TRIGGERS,
+  IMMUTABLE_TRIGGERS,
   NON_UUID_ID_COLUMNS,
   PARTIAL_UNIQUES,
   SMALLINT_COLUMNS,
@@ -239,21 +240,68 @@ export async function checkTypes(db: Queryable): Promise<string[]> {
   return out;
 }
 
-/** Rule 14: the order_items immutability trigger exists, is enabled and fires BEFORE UPDATE per row. */
-export async function checkImmutableTrigger(db: Queryable): Promise<string[]> {
-  const { rows } = await db.query<{ name: string; tbl: string; enabled: string; tgtype: number; fn: string }>(`
-    SELECT t.tgname::text AS name, c.relname::text AS tbl, t.tgenabled::text AS enabled, t.tgtype::int AS tgtype, p.proname::text AS fn
+interface TriggerRow extends Record<string, unknown> {
+  name: string;
+  tbl: string;
+  enabled: string;
+  tgtype: number;
+  fn: string;
+  is_constraint: boolean;
+  deferrable: boolean;
+  init_deferred: boolean;
+}
+
+async function triggers(db: Queryable): Promise<TriggerRow[]> {
+  const { rows } = await db.query<TriggerRow>(`
+    SELECT t.tgname::text AS name, c.relname::text AS tbl, t.tgenabled::text AS enabled, t.tgtype::int AS tgtype,
+           p.proname::text AS fn, (t.tgconstraint <> 0) AS is_constraint,
+           t.tgdeferrable AS deferrable, t.tginitdeferred AS init_deferred
       FROM pg_trigger t
       JOIN pg_class c ON c.oid = t.tgrelid
       JOIN pg_proc p ON p.oid = t.tgfoid
-     WHERE NOT t.tgisinternal AND t.tgname = $1`, [IMMUTABLE_TRIGGER.name]);
-  const row = rows[0];
-  if (!row) return [`missing trigger ${IMMUTABLE_TRIGGER.name}`];
+     WHERE NOT t.tgisinternal`);
+  return rows;
+}
+
+/** Rule 14 / Q-023: order_items UPDATE and DELETE are rejected by enabled row-level BEFORE triggers. */
+export async function checkImmutableTrigger(db: Queryable): Promise<string[]> {
+  const rows = await triggers(db);
   const out: string[] = [];
-  if (row.tbl !== IMMUTABLE_TRIGGER.table) out.push(`${row.name}: on ${row.tbl}, expected ${IMMUTABLE_TRIGGER.table}`);
-  if (row.enabled !== "O") out.push(`${row.name}: tgenabled=${row.enabled}, expected O (enabled)`);
-  if (row.tgtype !== IMMUTABLE_TRIGGER.tgtype) out.push(`${row.name}: tgtype=${row.tgtype}, expected ${IMMUTABLE_TRIGGER.tgtype} (BEFORE UPDATE FOR EACH ROW)`);
-  if (row.fn !== IMMUTABLE_TRIGGER.function) out.push(`${row.name}: function ${row.fn}, expected ${IMMUTABLE_TRIGGER.function}`);
+  for (const spec of IMMUTABLE_TRIGGERS) {
+    const row = rows.find((r) => r.name === spec.name);
+    if (!row) {
+      out.push(`missing trigger ${spec.name}`);
+      continue;
+    }
+    if (row.tbl !== spec.table) out.push(`${row.name}: on ${row.tbl}, expected ${spec.table}`);
+    if (row.enabled !== "O") out.push(`${row.name}: tgenabled=${row.enabled}, expected O (enabled)`);
+    if (row.tgtype !== spec.tgtype) out.push(`${row.name}: tgtype=${row.tgtype}, expected ${spec.tgtype}`);
+    if (row.fn !== spec.function) out.push(`${row.name}: function ${row.fn}, expected ${spec.function}`);
+  }
+  return out;
+}
+
+/** S3: the order<->payment consistency triggers exist, are enabled, AFTER ROW, and DEFERRABLE INITIALLY DEFERRED. */
+export async function checkConstraintTriggers(db: Queryable): Promise<string[]> {
+  const rows = await triggers(db);
+  const out: string[] = [];
+  for (const spec of CONSTRAINT_TRIGGERS) {
+    const row = rows.find((r) => r.name === spec.name);
+    if (!row) {
+      out.push(`missing constraint trigger ${spec.name}`);
+      continue;
+    }
+    if (row.tbl !== spec.table) out.push(`${row.name}: on ${row.tbl}, expected ${spec.table}`);
+    if (row.enabled !== "O") out.push(`${row.name}: tgenabled=${row.enabled}, expected O (enabled)`);
+    if (!row.is_constraint) out.push(`${row.name}: not a CONSTRAINT trigger`);
+    if (!row.deferrable || !row.init_deferred) {
+      out.push(`${row.name}: must be DEFERRABLE INITIALLY DEFERRED (checks the final state of the commit), got deferrable=${row.deferrable} initially deferred=${row.init_deferred}`);
+    }
+    if (row.tgtype !== spec.tgtype) out.push(`${row.name}: tgtype=${row.tgtype}, expected ${spec.tgtype} (AFTER ROW)`);
+    if (row.fn !== spec.function) out.push(`${row.name}: function ${row.fn}, expected ${spec.function}`);
+  }
+  const known = new Set([...IMMUTABLE_TRIGGERS, ...CONSTRAINT_TRIGGERS].map((t) => t.name));
+  for (const r of rows) if (!known.has(r.name)) out.push(`trigger ${r.tbl}.${r.name} is not listed in the contract manifest`);
   return out;
 }
 
@@ -267,6 +315,7 @@ export async function checkAll(db: Queryable): Promise<string[]> {
     ...(await checkForeignKeys(db)),
     ...(await checkTypes(db)),
     ...(await checkImmutableTrigger(db)),
+    ...(await checkConstraintTriggers(db)),
   ];
 }
 
@@ -286,8 +335,10 @@ export function protectedObjects() {
   for (const u of UNIQUES) names.add(u.name);
   for (const c of CHECKS) names.add(c.name);
   for (const f of COMPOSITE_FKS) names.add(f.name);
-  names.add(IMMUTABLE_TRIGGER.name);
-  names.add(IMMUTABLE_TRIGGER.function);
+  for (const t of [...IMMUTABLE_TRIGGERS, ...CONSTRAINT_TRIGGERS]) {
+    names.add(t.name);
+    names.add(t.function);
+  }
 
   const tables = new Set<string>(TABLES);
   const columns = new Set<string>();
@@ -344,6 +395,43 @@ export function findProtectedDrops(file: string, sql: string): DropFinding[] {
         });
       }
     }
+  }
+  return out;
+}
+
+// ───────────────────────── MIG-09: migrations must be transactional (S1) ─────────────────────────
+
+/**
+ * Prisma Migrate runs a migration file statement by statement WITHOUT a transaction (verified on 7.10.1; see
+ * MIG-10): when statement N fails, statements 1..N-1 stay applied and every later `migrate deploy` is blocked
+ * (P3009). Each migration must therefore be wrapped in BEGIN; ... COMMIT; so that a failure leaves nothing behind.
+ *
+ * Opt-out for commands that cannot run in a transaction block (CREATE INDEX CONCURRENTLY, VACUUM, ...): the file
+ * must have NO transaction control and carry the marker `-- no-transaction: <reason>` (such a migration should
+ * contain exactly one such statement so that a failure is still all-or-nothing).
+ */
+export function checkMigrationTransactionality(file: string, sql: string): string[] {
+  const out: string[] = [];
+  const marker = /^\s*--\s*no-transaction:\s*\S+/m.test(sql);
+  // blank dollar-quoted bodies (function bodies contain semicolons), then split into statements
+  const flat = stripComments(sql).replace(/\$([A-Za-z_]*)\$[\s\S]*?\$\1\$/g, "$$$$");
+  const stmts = flat
+    .split(";")
+    .map((x) => x.trim().replace(/\s+/g, " "))
+    .filter(Boolean);
+  const control = /^(BEGIN|START TRANSACTION|COMMIT|END|ROLLBACK|ABORT)\b/i;
+
+  if (marker) {
+    if (stmts.some((x) => control.test(x))) out.push(`${file}: has a no-transaction marker but also contains transaction control`);
+    return out;
+  }
+  if (stmts.length === 0) return [`${file}: empty migration`];
+  if (!/^(BEGIN|START TRANSACTION)$/i.test(stmts[0])) out.push(`${file}: the first statement must be BEGIN (migrations are not transactional by themselves)`);
+  if (!/^(COMMIT|END)$/i.test(stmts[stmts.length - 1])) out.push(`${file}: the last statement must be COMMIT`);
+  for (const x of stmts.slice(1, -1)) {
+    if (control.test(x)) out.push(`${file}: transaction control inside the wrapper ("${x.slice(0, 40)}"); later statements would run outside the transaction`);
+    if (/\bCONCURRENTLY\b/i.test(x)) out.push(`${file}: "${x.slice(0, 50)}..." cannot run inside a transaction; use the no-transaction marker in a separate migration`);
+    if (/^(VACUUM|CREATE DATABASE|DROP DATABASE|CREATE TABLESPACE|DROP TABLESPACE|ALTER SYSTEM)\b/i.test(x)) out.push(`${file}: "${x.slice(0, 40)}" cannot run inside a transaction`);
   }
   return out;
 }

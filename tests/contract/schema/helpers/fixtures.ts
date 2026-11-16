@@ -82,12 +82,25 @@ export async function mkIdentitySession(q: Queryable, subjectId: string, o: Row 
   });
 }
 
-export const mkOrder = (
+/**
+ * DATABASE.md §11.2 step 1: the purchase_quotas row is ensured (INSERT ... ON CONFLICT DO NOTHING) before an order
+ * exists. Since S4 the DB requires it (orders_quota_fk), so every order fixture does the same.
+ */
+export async function ensureQuota(q: Queryable, subjectId: string, sessionId: string, seatLimit = 4): Promise<void> {
+  await q.query(
+    `INSERT INTO purchase_quotas (identity_subject_id, show_session_id, seat_limit)
+     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [subjectId, sessionId, seatLimit],
+  );
+}
+
+export async function mkOrder(
   q: Queryable,
   ref: { sessionId: string; subjectId: string; identitySessionId: string },
   o: Row = {},
-) =>
-  insert(q, "orders", {
+) {
+  await ensureQuota(q, ref.subjectId, ref.sessionId);
+  return insert(q, "orders", {
     order_number: `NZ-T-${rnd()}`,
     show_session_id: ref.sessionId,
     identity_subject_id: ref.subjectId,
@@ -99,6 +112,7 @@ export const mkOrder = (
     hold_expires_at: inMinutes(7),
     ...o,
   });
+}
 
 export const mkOrderItem = (q: Queryable, ref: { orderId: string; sessionId: string; sessionSeatId: string }, o: Row = {}) =>
   insert(q, "order_items", { order_id: ref.orderId, show_session_id: ref.sessionId, session_seat_id: ref.sessionSeatId, price: 100000, ...o });
@@ -118,6 +132,29 @@ export const mkPayment = (q: Queryable, orderId: string, o: Row = {}) =>
     checkout_expires_at: inMinutes(7),
     ...o,
   });
+
+/**
+ * A confirmed order as Tx2 produces it (DATABASE.md §11.7): a SUCCEEDED PRIMARY payment for the order's total and the
+ * order set to PAID pointing at it. The two writes may happen in either order inside one transaction; the deferred
+ * consistency triggers check the final state at commit.
+ */
+export async function confirmOrder(q: Queryable, order: Row, o: Row = {}): Promise<Row> {
+  const payment = await mkPayment(q, order.id, {
+    status: "SUCCEEDED",
+    role: "PRIMARY",
+    requested_amount: order.total_amount,
+    approved_amount: order.total_amount,
+    ...o,
+  });
+  await update(q, "orders", order.id, { status: "PAID", confirmed_payment_id: payment.id, paid_at: new Date() });
+  return payment;
+}
+
+/** Runs the deferred (commit-time) checks now, then restores deferral. Throws exactly like COMMIT would. */
+export async function checkAtCommit(q: Queryable): Promise<void> {
+  await q.query("SET CONSTRAINTS ALL IMMEDIATE");
+  await q.query("SET CONSTRAINTS ALL DEFERRED");
+}
 
 export const mkRefund = (q: Queryable, ref: { orderId: string; paymentId: string }, o: Row = {}) =>
   insert(q, "refunds", {
@@ -219,6 +256,37 @@ export async function expectInsertError(
   expect(err, "expected the database to reject the statement").toBeDefined();
   expect(err!.code, `SQLSTATE (${err!.message})`).toBe(expected.code);
   if (expected.constraint) expect(err!.constraint, "constraint name").toBe(expected.constraint);
+}
+
+/**
+ * Asserts that `mutate` itself is ACCEPTED statement by statement but the transaction cannot COMMIT: the deferred
+ * constraint triggers (S3) reject the final state. `SET CONSTRAINTS ALL IMMEDIATE` runs the pending checks exactly as
+ * COMMIT would. The phase assertion guarantees the rejection came from a deferred check, not from an immediate one.
+ */
+export async function expectCommitError(
+  q: Queryable,
+  mutate: () => Promise<unknown>,
+  expected: { code: string; constraint: string },
+): Promise<void> {
+  await q.query("SAVEPOINT expect_commit_err");
+  let err: (Error & { code?: string; constraint?: string }) | undefined;
+  let phase: "statement" | "commit" | "none" = "none";
+  try {
+    phase = "statement";
+    await mutate();
+    phase = "commit";
+    await q.query("SET CONSTRAINTS ALL IMMEDIATE");
+    phase = "none";
+  } catch (e) {
+    err = e as Error & { code?: string; constraint?: string };
+  }
+  await q.query("ROLLBACK TO SAVEPOINT expect_commit_err");
+  await q.query("RELEASE SAVEPOINT expect_commit_err");
+  await q.query("SET CONSTRAINTS ALL DEFERRED");
+  expect(err, "expected the final state to be rejected at commit").toBeDefined();
+  expect(phase, `statements must be accepted and the COMMIT-time check must reject (got: ${err?.message})`).toBe("commit");
+  expect(err!.code, `SQLSTATE (${err!.message})`).toBe(expected.code);
+  expect(err!.constraint, "constraint name").toBe(expected.constraint);
 }
 
 export const PG = {

@@ -27,6 +27,7 @@ import {
   mkWorld,
   PG,
   update,
+  confirmOrder,
 } from "./helpers/fixtures";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
 
@@ -316,14 +317,14 @@ describe("rules 8 & 9 — confirmed payment belongs to the order; PAID needs one
       const w = await mkWorld(c);
       const o1 = await mkOrder(c, w.ref(w.u1, w.is1));
       const o2 = await mkOrder(c, w.ref(w.u2, w.is2));
-      const p1 = await mkPayment(c, o1.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
-      const p2 = await mkPayment(c, o2.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
+      // another order's (approved, not confirming) payment
+      const p2 = await mkPayment(c, o2.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
 
       await expectDbError(c, `UPDATE orders SET confirmed_payment_id = $1 WHERE id = $2`, [p2.id, o1.id], {
         code: PG.foreignKeyViolation,
         constraint: "orders_confirmed_payment_fk",
       });
-      await c.query(`UPDATE orders SET confirmed_payment_id = $1 WHERE id = $2`, [p1.id, o1.id]); // own payment: fine
+      const p1 = await confirmOrder(c, o1); // own SUCCEEDED PRIMARY payment: fine
       // p1 is already o1's confirmed payment: a second order cannot claim it. PostgreSQL checks the
       // unique index while writing the row (before the FK trigger), so UNIQUE is what reports it; the
       // FK would reject it too (p1 belongs to o1), as the first assertion above proves in isolation.
@@ -372,7 +373,9 @@ describe("rule 10 — cumulative refunds never exceed the approved amount", () =
     db.rolledBack(async (c) => {
       const w = await mkWorld(c);
       const order = await mkOrder(c, w.ref(w.u1, w.is1));
-      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
+      // EXCESS payment: its approved amount may legitimately differ from the order total, so the refund cap is
+      // exercised in isolation (a PRIMARY payment's approved amount is pinned by payments_primary_amount_ck).
+      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
 
       await expectDbError(c, `UPDATE payments SET refunded_amount = 100001 WHERE id = $1`, [p.id], {
         code: PG.checkViolation,
@@ -400,8 +403,9 @@ describe("rule 10 — cumulative refunds never exceed the approved amount", () =
       await expectInsertError(c, () => mkPayment(c, order.id, { requested_amount: 0 }), { code: PG.checkViolation, constraint: "payments_requested_amount_ck" });
       await expectInsertError(c, () => mkPayment(c, order.id, { method_type: "VIRTUAL_ACCOUNT" }), { code: PG.checkViolation, constraint: "payments_method_type_ck" });
       await expectInsertError(c, () => mkPayment(c, order.id, { status: "SUCCEEDED" }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
-      await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", role: "PRIMARY" }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
-      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
+      // approved_amount is set so that payments_primary_amount_ck is satisfied and only the role/status rule is violated
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", role: "PRIMARY", approved_amount: 100000 }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
+      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
       await expectInsertError(c, () => mkRefund(c, { orderId: order.id, paymentId: p.id }, { total_amount: 0 }), { code: PG.checkViolation, constraint: "refunds_total_amount_ck" });
       const r = await mkRefund(c, { orderId: order.id, paymentId: p.id });
       const orderItem = await mkOrderItem(c, { orderId: order.id, sessionId: w.s1.id, sessionSeatId: w.s1b.id });
@@ -500,8 +504,8 @@ describe("rule 13 (MIG-08) — order / hold / item / ticket / refund ownership a
       const w = await mkWorld(c);
       const a = await bookSeat(c, w, "u1", w.s1a, false);
       const b = await bookSeat(c, w, "u2", w.s1b, false);
-      const pa = await mkPayment(c, a.order.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
-      const pb = await mkPayment(c, b.order.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
+      const pa = await confirmOrder(c, a.order);
+      const pb = await confirmOrder(c, b.order);
 
       await expectInsertError(c, () => mkRefund(c, { orderId: a.order.id, paymentId: pb.id }), {
         code: PG.foreignKeyViolation,
@@ -549,13 +553,13 @@ describe("rule 14 — order_items are immutable after insert", () => {
       await mkOrderItem(c, { orderId: item.order_id, sessionId: w.s1.id, sessionSeatId: w.s1c.id }); // INSERT still works
     }));
 
-  it("an item referenced by a hold cannot be deleted either (ON DELETE RESTRICT)", () =>
+  it("an item referenced by a hold cannot be deleted either (the trigger fires before ON DELETE RESTRICT)", () =>
     db.rolledBack(async (c) => {
       const w = await mkWorld(c);
       const { item } = await bookSeat(c, w, "u1");
       await expectDbError(c, `DELETE FROM order_items WHERE id = $1`, [item.id], {
-        code: PG.foreignKeyViolation,
-        constraint: "seat_holds_item_order_seat_fk",
+        code: PG.restrictViolation,
+        message: /immutable: DELETE rejected/,
       });
     }));
 });

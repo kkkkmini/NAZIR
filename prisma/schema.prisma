@@ -177,10 +177,14 @@ model IdentityVerification {
   createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  identitySubject IdentitySubject? @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_verifications_subject_fk")
-  session         IdentitySession?
+  identitySubject IdentitySubject?  @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_verifications_subject_fk")
+  // DB enforces at most one session per verification (identity_sessions.identity_verification_id UNIQUE);
+  // Prisma needs a unique over all three composite-FK columns to call it 1:1, hence the list.
+  sessions        IdentitySession[]
 
   @@unique([provider, providerTransactionId], map: "identity_verifications_provider_txn_uq")
+  // target of identity_sessions (identity_verification_id, identity_subject_id, purpose) composite FK (Q-024)
+  @@unique([id, identitySubjectId, purpose], map: "identity_verifications_id_subject_purpose_uq")
   @@index([browserBindingHash, createdAt], map: "identity_verifications_binding_created_idx")
   @@index([status, expiresAt], map: "identity_verifications_status_expires_idx")
   @@map("identity_verifications")
@@ -200,7 +204,8 @@ model IdentitySession {
   createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  verification IdentityVerification @relation(fields: [identityVerificationId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_verification_fk")
+  // a session carries exactly the subject and purpose of the verification it claims (Q-024)
+  verification IdentityVerification @relation(fields: [identityVerificationId, identitySubjectId, purpose], references: [id, identitySubjectId, purpose], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_verification_subject_purpose_fk")
   subject      IdentitySubject      @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_subject_fk")
   orders       Order[]
 
@@ -226,6 +231,7 @@ model PurchaseQuota {
 
   identitySubject IdentitySubject @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "purchase_quotas_subject_fk")
   showSession     ShowSession     @relation(fields: [showSessionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "purchase_quotas_session_fk")
+  orders          Order[]
 
   @@id([identitySubjectId, showSessionId])
   @@map("purchase_quotas")
@@ -254,6 +260,8 @@ model Order {
 
   showSession      ShowSession     @relation(fields: [showSessionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "orders_show_session_fk")
   identitySubject  IdentitySubject @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "orders_subject_fk")
+  // an order cannot exist without its own purchase_quotas row (S4 / A-033); the row is locked first in §11.2
+  quota            PurchaseQuota   @relation(fields: [identitySubjectId, showSessionId], references: [identitySubjectId, showSessionId], onDelete: Restrict, onUpdate: Restrict, map: "orders_quota_fk")
   // the identity session must belong to the same subject (rule 12)
   identitySession  IdentitySession @relation(fields: [identitySessionId, identitySubjectId], references: [id, identitySubjectId], onDelete: Restrict, onUpdate: Restrict, map: "orders_identity_session_subject_fk")
   // the confirmed payment must belong to this very order (rule 8, B2). Circular with payments.
@@ -269,6 +277,8 @@ model Order {
   @@unique([confirmedPaymentId], map: "orders_confirmed_payment_id_uq")
   // target of order_items (order_id, show_session_id) composite FK
   @@unique([id, showSessionId], map: "orders_id_session_uq")
+  // target of payments (order_id, requested_amount) composite FK: a payment is always for the order's exact total (S3)
+  @@unique([id, totalAmount], map: "orders_id_total_uq")
   @@index([status, holdExpiresAt], map: "orders_status_hold_expires_idx")
   @@index([status, confirmProtectedUntil], map: "orders_status_confirm_protected_idx")
   @@index([identitySubjectId, createdAt], map: "orders_subject_created_idx")
@@ -410,7 +420,7 @@ model Payment {
   pgTransactionId    String?   @map("pg_transaction_id") @db.VarChar(200)
   status             String    @db.VarChar(30) // CHECK: READY | CONFIRMING | UNKNOWN | SUCCEEDED | FAILED | CANCELED
   role               String?   @db.VarChar(20) // CHECK: PRIMARY | EXCESS ; set iff status = SUCCEEDED
-  methodType         String    @map("method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY (D-005)
+  methodType         String    @map("method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY | OTHER; OTHER only for SUCCEEDED + EXCESS (D-005, Q-022)
   easyPayProvider    String?   @map("easy_pay_provider") @db.VarChar(50)
   cardCompany        String?   @map("card_company") @db.VarChar(50)
   requestedAmount    BigInt    @map("requested_amount") // CHECK > 0
@@ -432,7 +442,8 @@ model Payment {
   createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  order Order @relation("PaymentOrder", fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "payments_order_fk")
+  // requested_amount must equal the order's total_amount (S3 rule 7); the FK also guarantees the order exists.
+  order Order @relation("PaymentOrder", fields: [orderId, requestedAmount], references: [id, totalAmount], onDelete: Restrict, onUpdate: Restrict, map: "payments_order_total_fk")
 
   // DB enforces 1:1 via orders.confirmed_payment_id UNIQUE
   confirmedForOrders Order[]               @relation("OrderConfirmedPayment")
@@ -447,6 +458,7 @@ model Payment {
   // composite FK targets (orders.confirmed_payment, refunds.payment)
   @@unique([id, orderId], map: "payments_id_order_uq")
   // + partial unique (order_id) WHERE status IN ('READY','CONFIRMING','UNKNOWN') in raw SQL
+  // + partial unique (order_id) WHERE role = 'PRIMARY' in raw SQL (S3)
   @@index([orderId, createdAt], map: "payments_order_created_idx")
   @@index([status, nextRequeryAt], map: "payments_status_next_requery_idx")
   @@map("payments")

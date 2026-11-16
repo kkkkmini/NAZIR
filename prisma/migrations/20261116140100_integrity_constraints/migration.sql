@@ -1,15 +1,24 @@
 -- NAZIR Step 2 — integrity constraints that Prisma cannot express (raw SQL, hand written).
 --
 -- Contents (DATABASE.md §13.3, §14, §14.1):
---   A. Partial unique indexes            (5)  — final defence for seat hold / active order /
---                                               in-flight payment / valid ticket / open review case
+--   A. Partial unique indexes            (6)  — final defence for seat hold / active order /
+--                                               in-flight payment / PRIMARY payment / valid ticket /
+--                                               open review case
 --   B. CHECK constraints                      — state vocabularies, amounts, quota, ownership
---   C. order_items immutability trigger  (1)  — DATABASE.md §5.2, rule 14
+--   C. order_items immutability triggers (2)  — UPDATE and DELETE are rejected (rule 14, Q-023)
+--   D. Order <-> payment consistency     (2)  — DEFERRED constraint triggers (S3)
+--
+-- The whole script runs inside one explicit transaction (S1): Prisma Migrate does not wrap a
+-- migration in a transaction itself, so a failure would otherwise leave the earlier statements applied.
+-- Do not add statements that cannot run in a transaction block (CREATE INDEX CONCURRENTLY, ...) here;
+-- put them in their own migration with the marker documented in docs/DATABASE.md §19.9.
 --
 -- DO NOT drop or rename any object created here from a later Prisma-generated migration.
 -- Prisma does not track CHECK constraints, partial indexes or triggers, so `prisma migrate dev`
 -- will not warn about them. tests/contract/schema (MIG-02..MIG-06) fails if they disappear.
 -- Status vocabularies below must match src/server/db/constants.ts (enforced by test MIG-03b).
+
+BEGIN;
 
 -- ═════════════════════════════ A. Partial unique indexes ═════════════════════════════
 
@@ -27,6 +36,12 @@ CREATE UNIQUE INDEX "orders_active_subject_session_uq"
 CREATE UNIQUE INDEX "payments_in_progress_order_uq"
   ON "payments" ("order_id")
   WHERE "status" IN ('READY', 'CONFIRMING', 'UNKNOWN');
+
+-- S3: at most one PRIMARY (order-confirming) payment per order. EXCESS payments may be many (history is kept).
+-- Status-based uniqueness is deliberately not used (DATABASE.md §7.1); role is the discriminator.
+CREATE UNIQUE INDEX "payments_primary_order_uq"
+  ON "payments" ("order_id")
+  WHERE "role" = 'PRIMARY';
 
 -- Rule 7: at most one valid ticket per seat — H1 (§8.1).
 CREATE UNIQUE INDEX "tickets_valid_seat_uq"
@@ -174,11 +189,28 @@ ALTER TABLE "payments"
   ADD CONSTRAINT "payments_role_ck"
   CHECK ("role" IS NULL OR "role" IN ('PRIMARY', 'EXCESS'));
 
--- D-005: card and PG-supported easy pay only (virtual accounts are out of Phase 1).
--- NOTE: conflicts with the A-030 "disallowed method" path; see docs/DATABASE.md §19.7 (open item Q-022).
+-- D-005 + Q-022: a payment is requested as CARD or EASY_PAY. If the PG later reports that an APPROVED payment
+-- used something else (virtual account, a method outside the allow-list, ...), the ledger must still record the
+-- approval, so method_type becomes OTHER. The real details stay in card_company / easy_pay_provider (free text,
+-- no allow-list CHECK: D4) and in review_cases(DISALLOWED_METHOD).detail.
 ALTER TABLE "payments"
   ADD CONSTRAINT "payments_method_type_ck"
-  CHECK ("method_type" IN ('CARD', 'EASY_PAY'));
+  CHECK ("method_type" IN ('CARD', 'EASY_PAY', 'OTHER'));
+
+-- OTHER can only describe an approved payment that was NOT used to fulfil the order. It can never be
+-- READY/CONFIRMING/UNKNOWN (those are requests the server created) and never PRIMARY. Single-statement
+-- transition: UPDATE ... SET status = 'SUCCEEDED', role = 'EXCESS', method_type = 'OTHER'.
+-- (IS NOT DISTINCT FROM keeps the check NULL-safe: role may be NULL.)
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_method_type_other_ck"
+  CHECK ("method_type" <> 'OTHER' OR ("status" = 'SUCCEEDED' AND "role" IS NOT DISTINCT FROM 'EXCESS'));
+
+-- S3: a PRIMARY payment was approved for exactly the amount requested. Together with the composite FK
+-- payments_order_total_fk (requested_amount = orders.total_amount) this means approved = order total.
+-- NULL-safe: a PRIMARY payment without an approved amount is rejected.
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_primary_amount_ck"
+  CHECK ("role" IS DISTINCT FROM 'PRIMARY' OR ("approved_amount" IS NOT NULL AND "approved_amount" = "requested_amount"));
 
 ALTER TABLE "payments"
   ADD CONSTRAINT "payments_requested_amount_ck"
@@ -260,14 +292,15 @@ ALTER TABLE "outbox_events"
 
 -- ═════════════════════════════ C. order_items immutability ═════════════════════════════
 
--- Rule 14 (D-001 / A-006): order_items rows are never updated after insert. Changing seats means
--- cancelling the order and booking again. DELETE is deliberately not blocked here: DATABASE.md §5.2
--- only asks for an UPDATE block, and referenced items are already protected by ON DELETE RESTRICT.
--- (Open question Q-023 in docs/DECISIONS.md.)
-CREATE FUNCTION "order_items_reject_update"() RETURNS trigger
+-- Rule 14 (D-001 / A-006, Q-023): order_items is an immutable ledger. Rows are only ever INSERTed, in the order
+-- creation transaction. UPDATE and DELETE are rejected with SQLSTATE 23001 (restrict_violation). If the creating
+-- transaction rolls back, the INSERT simply never happened (no DELETE is involved).
+-- Not covered here: TRUNCATE and a superuser/owner disabling the triggers; restrict those through database roles
+-- (Step 10, S9). Retention / privacy purges must be a separate, explicitly approved procedure (Q-016).
+CREATE FUNCTION "order_items_reject_change"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'order_items rows are immutable (id=%)', OLD."id"
+  RAISE EXCEPTION 'order_items rows are immutable: % rejected (id=%)', TG_OP, OLD."id"
     USING ERRCODE = 'restrict_violation',
           HINT = 'Cancel the order and create a new one instead of changing its items (D-001).';
 END;
@@ -276,4 +309,104 @@ $$;
 CREATE TRIGGER "order_items_no_update"
   BEFORE UPDATE ON "order_items"
   FOR EACH ROW
-  EXECUTE FUNCTION "order_items_reject_update"();
+  EXECUTE FUNCTION "order_items_reject_change"();
+
+CREATE TRIGGER "order_items_no_delete"
+  BEFORE DELETE ON "order_items"
+  FOR EACH ROW
+  EXECUTE FUNCTION "order_items_reject_change"();
+
+-- ═════════════════════════════ D. order <-> payment consistency (S3) ═════════════════════════════
+--
+-- Invariants (DATABASE.md §5.1, §7.1; "PRIMARY = the approved payment used to confirm the order,
+-- equal to orders.confirmed_payment_id"):
+--   I1  orders.confirmed_payment_id references a payment of the SAME order           (composite FK, immediate)
+--   I2  that payment is role = PRIMARY and status = SUCCEEDED                        (trigger below)
+--   I3  every PRIMARY payment is the confirmed payment of its order                  (trigger below)
+--   I4  at most one PRIMARY payment per order                                        (payments_primary_order_uq)
+--   I5  PRIMARY.approved_amount = requested_amount = orders.total_amount              (CHECK + composite FK)
+--   I6  any number of EXCESS payments per order                                      (no constraint, by design)
+--
+-- orders and payments reference each other, and the confirmation sets both sides in ONE transaction
+-- (DATABASE.md §11.7), in either statement order. I2/I3 therefore cannot be checked per statement: they are
+-- DEFERRABLE INITIALLY DEFERRED constraint triggers that run at COMMIT against the FINAL state. Consequences:
+--   * violations surface when the transaction commits (or at SET CONSTRAINTS ... IMMEDIATE), not mid-transaction;
+--   * deferred row events carry the row image of the moment of the statement, so the functions re-read the
+--     current rows instead of trusting NEW/OLD;
+--   * the functions only read, take no row locks, and so do not interfere with the global lock order (§13.2).
+-- Errors use SQLSTATE 23514 and carry the constraint name for domain error mapping (§14.1).
+
+CREATE FUNCTION "orders_check_confirmed_payment"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  cur_confirmed uuid;
+BEGIN
+  SELECT o."confirmed_payment_id" INTO cur_confirmed FROM "orders" o WHERE o."id" = NEW."id";
+
+  -- I2: the confirmed payment must be this order's SUCCEEDED PRIMARY payment
+  IF cur_confirmed IS NOT NULL THEN
+    PERFORM 1 FROM "payments" p
+      WHERE p."id" = cur_confirmed AND p."order_id" = NEW."id" AND p."role" = 'PRIMARY' AND p."status" = 'SUCCEEDED';
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'order % confirms payment % which is not its SUCCEEDED PRIMARY payment', NEW."id", cur_confirmed
+        USING ERRCODE = 'check_violation', TABLE = 'orders', CONSTRAINT = 'orders_confirmed_payment_primary_ck';
+    END IF;
+  END IF;
+
+  -- I3 (order side): a payment that this order stopped confirming must not stay PRIMARY
+  IF OLD."confirmed_payment_id" IS NOT NULL AND OLD."confirmed_payment_id" IS DISTINCT FROM cur_confirmed THEN
+    PERFORM 1 FROM "payments" p WHERE p."id" = OLD."confirmed_payment_id" AND p."role" = 'PRIMARY';
+    IF FOUND THEN
+      RAISE EXCEPTION 'order % no longer confirms payment %, but that payment is still PRIMARY', NEW."id", OLD."confirmed_payment_id"
+        USING ERRCODE = 'check_violation', TABLE = 'orders', CONSTRAINT = 'orders_confirmed_payment_detach_ck';
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+-- INSERT is not covered on purpose: a new order cannot already reference a payment (the payment would need the order
+-- first), which the composite FK enforces.
+CREATE CONSTRAINT TRIGGER "orders_confirmed_payment_guard"
+  AFTER UPDATE OF "confirmed_payment_id" ON "orders"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "orders_check_confirmed_payment"();
+
+CREATE FUNCTION "payments_check_primary_confirmed"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  cur_role text;
+  cur_order uuid;
+BEGIN
+  SELECT p."role", p."order_id" INTO cur_role, cur_order FROM "payments" p WHERE p."id" = NEW."id";
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  IF cur_role = 'PRIMARY' THEN
+    -- I3 (payment side): a PRIMARY payment is the confirmed payment of its order
+    PERFORM 1 FROM "orders" o WHERE o."id" = cur_order AND o."confirmed_payment_id" = NEW."id";
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'payment % is PRIMARY but order % does not confirm it', NEW."id", cur_order
+        USING ERRCODE = 'check_violation', TABLE = 'payments', CONSTRAINT = 'payments_primary_confirmed_ck';
+    END IF;
+  ELSE
+    -- I2 (payment side): a payment that an order confirms cannot be demoted / un-succeeded
+    PERFORM 1 FROM "orders" o WHERE o."confirmed_payment_id" = NEW."id";
+    IF FOUND THEN
+      RAISE EXCEPTION 'payment % is confirmed by an order but is no longer a SUCCEEDED PRIMARY payment', NEW."id"
+        USING ERRCODE = 'check_violation', TABLE = 'payments', CONSTRAINT = 'payments_confirmed_must_be_primary_ck';
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER "payments_primary_guard"
+  AFTER INSERT OR UPDATE OF "role", "status", "order_id" ON "payments"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "payments_check_primary_confirmed"();
+
+COMMIT;

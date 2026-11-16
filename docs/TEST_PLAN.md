@@ -29,7 +29,11 @@
 | INV-5 | 주문당 진행 중 결제 ≤ 1, `PAID` 주문은 `confirmed_payment_id` 보유 |
 | INV-6 | 결제별 `refunded_amount` ≤ `approved_amount` |
 | INV-7 | hold·항목·티켓·환불 항목의 주문·좌석·회차 소속 일치 |
-| INV-8 | `order_items` 생성 후 변경 없음 |
+| INV-8 | `order_items` 생성 후 변경·삭제 없음 |
+| INV-9 | `SOLD` 좌석에 live(`ACTIVE`/`CONFIRMING`) hold가 없다 *(DB 미보장 — Step 5 서비스·동시성 테스트와 정합성 검사로 확인, S2)* |
+| INV-10 | 종료 주문(`CANCELED`/`EXPIRED`/`UNFULFILLED`/`REFUNDED`)에 live hold가 없고, 유효 티켓은 `SOLD` 좌석·소유 항목과 일치한다 *(DB 미보장 — Step 9 정합성 검사, S5)* |
+| INV-11 | `PRIMARY` 결제 ⇔ 주문의 확정 결제, 주문당 `PRIMARY` ≤ 1, `PRIMARY` 승인 금액 = 요청 금액 = 주문 총액 *(DB 보장 — 사후 확인용)* |
+| INV-12 | 주문 `total_amount` = 항목 가격 합계, 항목 수 1~`max_seats_per_identity` *(DB 미보장 — 주문 생성 트랜잭션·정합성 검사)* |
 
 ## 2. P0 스키마 계약 / Migration
 
@@ -43,18 +47,43 @@
 | MIG-06 | 이후 migration 생성 시 raw SQL 객체 DROP 여부 | DROP 문 없음(CI 검사) |
 | MIG-07 | 타입 검사: 시각 컬럼 `timestamptz`, 금액 `bigint` | 일치 |
 | MIG-08 | 소속 불일치 직접 삽입(다른 회차 좌석 항목, 다른 공연장 좌석의 회차 좌석, 다른 주문 hold) | FK 위반으로 거부 |
+| MIG-09 | 모든 migration이 `BEGIN; … COMMIT;`으로 감싸짐(정적 검사, 트랜잭션 불가 문장은 `-- no-transaction:` 표지) | 위반 없음, 검사기가 래퍼 누락·중간 COMMIT·`CONCURRENTLY`를 검출 |
+| MIG-10 | **실제 migration 파일에 마지막 문장 실패를 주입**해 실제 Prisma CLI로 적용 | 실패한 migration의 테이블·인덱스·제약·트리거·함수가 하나도 남지 않고 앞선 migration은 유지, `migrate deploy`는 `P3009`로 차단, 수정 후 `migrate resolve --rolled-back` + 재배포 성공, 전체 계약 통과. 음성 대조군: 래퍼 없이 같은 실패 시 27개 테이블이 남음 |
+| MIG-11 | 결제·주문 정합성(S3): 정상 `PRIMARY`+`PAID`(문장 순서 무관), `FAILED`/`CANCELED`/`READY`/`CONFIRMING`/`UNKNOWN`/`EXCESS` 결제를 확정 결제로 지정, 승인 금액 ≠ 주문 총액인 `PRIMARY`, 한 주문에 `PRIMARY` 2건, `EXCESS` 여러 건, 다른 주문 결제 지정, 요청 금액 ≠ 주문 총액, **UPDATE 우회**(강등·재지정·분리·승격) | 정상·`EXCESS` 다건은 허용, 나머지는 즉시 또는 **COMMIT에서** 거부(제약 이름 확인). 실제 COMMIT 시험 포함 |
+| MIG-12 | 주문↔쿼터 FK(S4): 쿼터 행 없음, 다른 주체, 다른 회차, 정상, 쿼터 행 삭제·키 변경, 쿼터 행 없는 상태의 2커넥션 동시 예약(QTA-07·QTA-20의 DB 수준) | 정상만 허용, 동시 요청은 쿼터 행에서 직렬화, 한도는 CHECK가 최종 방어 |
+| MIG-13 | 인증 세션 ↔ 원 인증(Q-024): 다른 주체, 다른 purpose, 미검증 인증, 정상, 세션 후 원 인증 변경 | 정상만 허용, 인증 1건당 세션 1개 유지 |
+| MIG-14 | `method_type = OTHER`(Q-022): `SUCCEEDED`+`EXCESS`만 허용, `READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`/`PRIMARY` 거부, 허용 외 카드사·간편결제사 문자열 기록, `PRIMARY` 승격 UPDATE 거부 | 위 규칙대로 |
+| MIG-15 | `order_items` UPDATE·DELETE 차단(Q-023), 주문 생성 트랜잭션 롤백 시 항목이 남지 않음 | UPDATE·DELETE 모두 SQLSTATE `23001`, 롤백은 정상 |
+| MIG-16 | 타임스탬프 출처(D3): DB 기본값 `CURRENT_TIMESTAMP`, raw SQL의 DB 시각(트랜잭션 시작), raw UPDATE는 `updated_at` 불변, Prisma Client는 앱 시각을 명시 전송 | 실측과 일치(Prisma 업그레이드 시 변하면 실패) |
 
-**Step 2 구현 상태 (2026-11-16):** MIG-01~08 구현·통과. 실행: `TEST_DATABASE_URL=postgresql://… npm run test:db` (실제 PostgreSQL 15+ 필수, 미설정 시 건너뛰지 않고 실패). CI는 `.github/workflows/ci.yml`의 `db` job(`postgres:16` 서비스 컨테이너). 파일과 범위:
+**Step 2 구현 상태 (2026-11-16):** MIG-01~16 구현·통과. 실행: `TEST_DATABASE_URL=postgresql://… npm run test:db` (실제 PostgreSQL 15+ 필수, 미설정 시 건너뛰지 않고 실패). CI는 `.github/workflows/ci.yml`의 `db` job(`postgres:16` 서비스 컨테이너). 파일과 범위:
 
 | 파일 | 내용 |
 |---|---|
-| `tests/contract/schema/migrations.test.ts` | MIG-01(빈 DB에 `migrate deploy`, 재실행 멱등), MIG-02, MIG-03·**MIG-03b**(DB CHECK 어휘 = `src/server/db/constants.ts`), MIG-04(모든 FK RESTRICT 포함), MIG-05(카탈로그), MIG-06(정적 DROP 검사 + 검사기가 공허하지 않음을 보이는 합성 SQL), MIG-07, **DRIFT-01**(`prisma migrate diff` 빈 결과), 음성 대조군(일부러 망가뜨린 DB에서 검사기가 위반을 검출) |
+| `tests/contract/schema/migrations.test.ts` | MIG-01(빈 DB에 `migrate deploy`, 재실행 멱등), MIG-02, MIG-03·**MIG-03b**(DB CHECK 어휘 = `src/server/db/constants.ts`), MIG-04(모든 FK RESTRICT 포함), MIG-05(카탈로그), MIG-06(정적 DROP 검사 + 합성 SQL로 검사기 검증), MIG-07, **DRIFT-01**, `DB_CONSTRAINT` 이름이 실제 DB 객체인지 검증, 음성 대조군(일부러 망가뜨린 DB에서 검사기가 위반을 검출) |
+| `tests/contract/schema/migration-safety.test.ts` | **MIG-09**(모든 migration 트랜잭션 래핑 + 검사기 검증), **MIG-10**(실제 Prisma CLI, 실제 migration에 실패 주입, 롤백·`P3009`·`resolve --rolled-back`·재시도, 래퍼 없는 음성 대조군) |
 | `tests/contract/schema/integrity.test.ts` | MIG-05(동작), MIG-08, 규칙 1~14의 동작 증명(SQLSTATE·제약 이름 단언), 실제 2커넥션 동시 INSERT, QTA-18·QTA-19·ORD-17 중 DB 수준 부분 |
-| `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`, Prisma 7 + `@prisma/adapter-pg`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED 트랜잭션, DB↔환경 불일치 거부 |
+| `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK |
+| `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
 | `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 |
 | `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) |
 
-필수 제약 목록(단일 정본)은 `tests/contract/schema/manifest.ts`다. 새 제약·테이블을 추가하면 여기에도 추가한다. MIG-06은 이후 migration이 manifest의 객체를 DROP하거나(`DROP INDEX/CONSTRAINT/TRIGGER/FUNCTION`), 그 객체가 의존하는 컬럼·테이블을 DROP하면 실패한다.
+필수 제약 목록(단일 정본)은 `tests/contract/schema/manifest.ts`다. 새 제약·테이블을 추가하면 여기에도 추가한다. MIG-06은 이후 migration이 manifest의 객체를 DROP하거나(`DROP INDEX/CONSTRAINT/TRIGGER/FUNCTION`), 그 객체가 의존하는 컬럼·테이블을 DROP하면 실패한다(정당한 CHECK 어휘 확장의 `DROP`+`ADD`도 현재는 위반으로 판정한다 — S8로 개선 예정). 롤백 트랜잭션 헬퍼 `rolledBack`은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 실패한다.
+
+### 2.1 보완 구현의 공허성 검증
+
+새 제약이 실제로 잘못된 상태를 막는지 확인하기 위해 보호 장치를 하나씩 제거(뮤테이션)해 실행했다: `payments_primary_order_uq`, 지연 trigger 2개 각각, 지연 속성(`DEFERRABLE INITIALLY DEFERRED`) 제거, `payments_primary_amount_ck`, `payments_method_type_other_ck`, `order_items_no_delete`, `orders_quota_fk`, `payments_order_total_fk`(복합 → 단일 FK), `identity_sessions` 복합 FK(→ 단일 FK), migration 트랜잭션 래퍼 — **11개 모두** 해당 영역 테스트가 실패했다. 새 제약을 추가·변경할 때는 같은 방식으로 제거 시험을 한다.
+
+### 2.2 후속 Step으로 이월한 DB 점검 (Step 2 기술 검토 S2·S5·S7·S8·S9·S10)
+
+| 항목 | 내용 | 반영 Step | 테스트 |
+|---|---|---|---|
+| S2 | `SOLD` 좌석에 `ACTIVE`/`CONFIRMING` hold를 넣을 수 있다(DB 미보장). 주문 생성의 AVAILABLE 검사(§11.2 4단계)를 우회하는 경로가 없어야 한다. DB 방어(constraint trigger)의 가능성도 Step 5 시작 전 재검토 | Step 5 | SEAT-04·05의 `SOLD` 변형 신설, INV-9, 동시 요청 시험 |
+| S5 | 종료 주문의 live hold, 미판매 좌석의 `ISSUED` 티켓 | Step 9 | INV-10 정합성 검사 + review case |
+| S7 | Prisma가 트리거 오류(`23001`)를 `P2003`으로 위장하고 제약 이름은 `meta.driverAdapterError.cause`에 있음 | Step 5 시작 전 | 오류 매핑 단위 테스트: 모든 `DB_CONSTRAINT`가 의도한 도메인 오류로 변환 |
+| S8 | MIG-06 검사기 개선: 같은 migration에서 같은 이름으로 다시 만드는 `DROP`+`ADD`(CHECK 어휘 확장)는 허용하되 진짜 제거는 계속 검출 | 별도 테스트 개선 | `findProtectedDrops` 합성 케이스 확장 |
+| S9 | `lock_timeout`·`statement_timeout`·`idle_in_transaction_session_timeout`(현재 0), TLS 강제, 앱 DB 역할 분리(원장 UPDATE/DELETE/TRUNCATE 권한 제거) | Step 10 | 인프라 검증·리허설 |
+| S10 | partial unique를 대상으로 한 `INSERT … ON CONFLICT`는 인덱스 predicate를 그대로 명시해야 한다 | Step 5 | 해당 쿼리의 통합 테스트 |
 
 ## 3. P0 좌석/점유
 
@@ -379,3 +408,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.1 | 2026-11-14 | 파일명 `TEST_PLAN.md`로 정정. 공통 사후 불변식, MIG(스키마 계약), QTA(동일인 4석·활성 주문), WH(재처리), LOAD 추가. 좌석 변경 테스트 삭제 → 취소 후 재예매(ORD-12~16). 인증 선행·바인딩·claim(IDV), 결제 확인 펜싱·3분 보호·UNKNOWN(PAY-05~11, 20~25), 소유 주체 Idempotency(ORD-05), 환불 유형·소유권·대사(REF-10~17), review case(ADM-07~09) 추가. 환불·관리자를 P0로 이동 |
 | 1.2 | 2026-11-15 | QTA-20~28(쿼터 행 미존재 동시 요청·롤백, REVIEW_REQUIRED 차단, `RELEASE_SEATS`→UNFULFILLED 원자성, PAID 초과 승인, UNKNOWN 차단, 격리 수준, seat_limit snapshot), IDV-18~22(고정 30분, 재사용, 잔여 10분, 주문 생성 제한, 다른 브라우저), PAY-26~31(결제수단 활성화·허용 목록, confirm 멱등 재시도, 60초/3분, EXPIRED, 제외 수단), WH-10~13, §16 PRV(운영 Mock 차단), §17 SBX(토스 sandbox 계약 테스트·미확인 항목 확인), §18 NIC(NICE adapter) 추가. Go/No-Go에 D-012 조건부 개시·D-013 NICE 지연 시 No-Go 반영. 보안 체크리스트 보강. 이전 원문: `docs/archive/v1.1/TEST_PLAN.md` |
 | 1.2.1 | 2026-11-16 | Step 2 구현 상태 반영: MIG-01~08 구현, MIG-03b·DRIFT-01·SEED-01~04 추가, 테스트 파일 대응·실행 방법. 시나리오 정의는 변경 없음 |
+| 1.2.2 | 2026-11-16 | Step 2 보완 반영: MIG-09~16 신설(migration 트랜잭션·실패 복구, 결제·주문 정합성, 쿼터 FK, 인증 세션 FK, `OTHER`, DELETE 차단, 타임스탬프), INV-9~12, §2.1 공허성 검증, §2.2 후속 Step 이월 항목. 기존 시나리오 정의는 변경 없음 |

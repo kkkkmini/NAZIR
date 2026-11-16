@@ -78,3 +78,63 @@ describe("DB-01 Prisma Client", () => {
     ).rejects.toThrow(/requires a database whose name ends with "_test"/);
   });
 });
+
+/**
+ * DB-02 (D3 / Q-026): what actually writes created_at / updated_at. Measured, not assumed:
+ *   - DB defaults are CURRENT_TIMESTAMP (transaction start time) for every created_at / updated_at;
+ *   - raw SQL that omits them gets the DATABASE clock; a raw UPDATE does NOT touch updated_at (no trigger);
+ *   - Prisma Client 7.10.1 (adapter-pg) sends BOTH columns explicitly with the APPLICATION clock on INSERT, and
+ *     updated_at on UPDATE, so the DB default is not used for Client writes.
+ * If a Prisma upgrade changes this, these tests fail and docs/DATABASE.md §19.5 must be revisited.
+ */
+describe("DB-02 timestamp sources", () => {
+  it("every created_at / updated_at / received_at column defaults to CURRENT_TIMESTAMP (the @default(now()) -> DB default mapping)", async () => {
+    const { rows } = await db.query<{ table_name: string; column_name: string; column_default: string | null; is_nullable: string }>(`
+      SELECT c.table_name, c.column_name, c.column_default, c.is_nullable
+        FROM information_schema.columns c JOIN information_schema.tables t USING (table_schema, table_name)
+       WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE' AND c.table_name <> '_prisma_migrations'
+         AND c.column_name IN ('created_at', 'updated_at', 'received_at', 'last_received_at')`);
+    expect(rows.length).toBeGreaterThanOrEqual(45);
+    const wrong = rows.filter((r) => r.column_default !== "CURRENT_TIMESTAMP" || r.is_nullable !== "NO");
+    expect(wrong).toEqual([]);
+    expect(rows.filter((r) => r.column_name === "updated_at")).toHaveLength(19);
+  });
+
+  it("raw SQL: omitted created_at / updated_at come from the DB clock = transaction start; a raw UPDATE leaves updated_at alone", async () => {
+    await db.rolledBack(async (c) => {
+      const { rows: t0 } = await c.query<{ now: Date }>(`SELECT now() AS now`);
+      await c.query(`SELECT pg_sleep(0.05)`);
+      const { rows } = await c.query<{ id: string; created_at: Date; updated_at: Date }>(`INSERT INTO venues (name) VALUES ('ts') RETURNING id, created_at, updated_at`);
+      expect(rows[0].created_at.getTime()).toBe(t0[0].now.getTime()); // transaction START time, not statement time
+      expect(rows[0].updated_at.getTime()).toBe(t0[0].now.getTime());
+      await c.query(`SELECT pg_sleep(0.05)`);
+      const { rows: after } = await c.query<{ updated_at: Date }>(`UPDATE venues SET name = 'ts2' WHERE id = $1 RETURNING updated_at`, [rows[0].id]);
+      expect(after[0].updated_at.getTime()).toBe(rows[0].updated_at.getTime()); // no trigger: raw writers must set updated_at themselves
+    });
+  });
+
+  it("Prisma Client: created_at and updated_at are sent explicitly from the application clock", async () => {
+    const { PrismaClient } = await import("../../../src/generated/prisma/client");
+    const { PrismaPg } = await import("@prisma/adapter-pg");
+    const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: db.url }), log: [{ emit: "event", level: "query" }] });
+    const events: { query: string; params: string }[] = [];
+    (prisma as unknown as { $on(e: "query", cb: (x: { query: string; params: string }) => void): void }).$on("query", (e) => events.push(e));
+    try {
+      const before = Date.now();
+      const venue = await prisma.venue.create({ data: { name: "ts-client" } });
+      const insert = events.find((e) => e.query.includes('INSERT INTO "public"."venues"'))!;
+      expect(insert.query).toContain('"created_at"');
+      expect(insert.query).toContain('"updated_at"');
+      const stamps = (JSON.parse(insert.params) as unknown[]).filter((v): v is string => typeof v === "string" && /^\d{4}-\d\d-\d\dT/.test(v));
+      expect(stamps).toHaveLength(2); // both columns carry a client-supplied timestamp
+      for (const st of stamps) expect(Math.abs(Date.parse(st) - before)).toBeLessThan(5_000);
+
+      events.length = 0;
+      await prisma.venue.update({ where: { id: venue.id }, data: { name: "ts-client-2" } });
+      const upd = events.find((e) => e.query.includes('UPDATE "public"."venues"'))!;
+      expect(upd.query).toContain('"updated_at"');
+    } finally {
+      await prisma.$disconnect();
+    }
+  });
+});

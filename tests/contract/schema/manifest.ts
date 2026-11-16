@@ -87,6 +87,13 @@ export const PARTIAL_UNIQUES: PartialUnique[] = [
     rule: "3: one in-flight payment per order (A-005)",
   },
   {
+    name: "payments_primary_order_uq",
+    table: "payments",
+    columns: ["order_id"],
+    predicate: { column: "role", op: "in", values: ["PRIMARY"] },
+    rule: "S3: one PRIMARY (order-confirming) payment per order",
+  },
+  {
     name: "tickets_valid_seat_uq",
     table: "tickets",
     columns: ["session_seat_id"],
@@ -119,6 +126,8 @@ export const UNIQUES: UniqueSpec[] = [
   { name: "session_seats_session_seat_uq", table: "session_seats", columns: ["show_session_id", "seat_id"] },
   { name: "session_seats_sold_order_item_id_uq", table: "session_seats", columns: ["sold_order_item_id"] },
   { name: "identity_subjects_key_uq", table: "identity_subjects", columns: ["subject_key_type", "key_version", "subject_key_hash"] },
+  { name: "identity_verifications_id_subject_purpose_uq", table: "identity_verifications", columns: ["id", "identity_subject_id", "purpose"] },
+  { name: "orders_id_total_uq", table: "orders", columns: ["id", "total_amount"] },
   { name: "identity_verifications_provider_txn_uq", table: "identity_verifications", columns: ["provider", "provider_transaction_id"] },
   { name: "identity_sessions_verification_uq", table: "identity_sessions", columns: ["identity_verification_id"] },
   { name: "identity_sessions_token_hash_uq", table: "identity_sessions", columns: ["token_hash"] },
@@ -192,7 +201,9 @@ export const CHECKS: CheckSpec[] = [
   vocab("idempotency_records", "resource_type", IDEMPOTENCY_RESOURCE_TYPE),
   vocab("payments", "status", PAYMENT_STATUS),
   vocab("payments", "role", PAYMENT_ROLE),
-  { name: "payments_method_type_ck", table: "payments", columns: ["method_type"], vocab: PAYMENT_METHOD_TYPE, rule: "D-005: card / easy pay only" },
+  { name: "payments_method_type_ck", table: "payments", columns: ["method_type"], vocab: PAYMENT_METHOD_TYPE, rule: "D-005, Q-022: CARD / EASY_PAY / OTHER" },
+  { name: "payments_method_type_other_ck", table: "payments", columns: ["method_type", "status", "role"], rule: "Q-022: OTHER only for SUCCEEDED + EXCESS" },
+  { name: "payments_primary_amount_ck", table: "payments", columns: ["role", "approved_amount", "requested_amount"], rule: "S3: PRIMARY approved = requested" },
   vocab("payment_webhook_events", "status", WEBHOOK_EVENT_STATUS),
   vocab("payment_status_logs", "source", PAYMENT_LOG_SOURCE),
   vocab("refunds", "refund_type", REFUND_TYPE),
@@ -237,6 +248,9 @@ export interface CompositeFk {
 
 export const COMPOSITE_FKS: CompositeFk[] = [
   { name: "show_sessions_show_venue_fk", table: "show_sessions", columns: ["show_id", "venue_id"], refTable: "shows", refColumns: ["id", "venue_id"], rule: "session venue = show venue" },
+  { name: "identity_sessions_verification_subject_purpose_fk", table: "identity_sessions", columns: ["identity_verification_id", "identity_subject_id", "purpose"], refTable: "identity_verifications", refColumns: ["id", "identity_subject_id", "purpose"], rule: "Q-024: session subject + purpose = verification's" },
+  { name: "orders_quota_fk", table: "orders", columns: ["identity_subject_id", "show_session_id"], refTable: "purchase_quotas", refColumns: ["identity_subject_id", "show_session_id"], rule: "S4: an order needs its quota row" },
+  { name: "payments_order_total_fk", table: "payments", columns: ["order_id", "requested_amount"], refTable: "orders", refColumns: ["id", "total_amount"], rule: "S3: requested_amount = order total" },
   { name: "session_seats_session_venue_fk", table: "session_seats", columns: ["show_session_id", "venue_id"], refTable: "show_sessions", refColumns: ["id", "venue_id"], rule: "5" },
   { name: "session_seats_seat_venue_fk", table: "session_seats", columns: ["seat_id", "venue_id"], refTable: "seats", refColumns: ["id", "venue_id"], rule: "5: only the session venue's seats are sellable" },
   { name: "session_seats_sold_item_seat_fk", table: "session_seats", columns: ["sold_order_item_id", "id"], refTable: "order_items", refColumns: ["id", "session_seat_id"], rule: "6: owner item belongs to this seat" },
@@ -287,10 +301,17 @@ export const NON_UUID_ID_COLUMNS = new Set([
 
 // ───────────────────────── trigger ─────────────────────────
 
-export const IMMUTABLE_TRIGGER = {
-  name: "order_items_no_update",
-  table: "order_items",
-  /** tgtype bits: ROW(1) | BEFORE(2) | UPDATE(16) */
-  tgtype: 1 | 2 | 16,
-  function: "order_items_reject_update",
-};
+/** pg_trigger.tgtype bits: ROW(1) | BEFORE(2) | DELETE(8) | UPDATE(16) */
+export const IMMUTABLE_TRIGGERS = [
+  { name: "order_items_no_update", table: "order_items", tgtype: 1 | 2 | 16, function: "order_items_reject_change" },
+  { name: "order_items_no_delete", table: "order_items", tgtype: 1 | 2 | 8, function: "order_items_reject_change" },
+];
+
+/**
+ * S3: deferred constraint triggers (order <-> payment consistency). They run at COMMIT against the final state.
+ * tgtype bits: ROW(1) | INSERT(4) | UPDATE(16); AFTER = no BEFORE/INSTEAD bit.
+ */
+export const CONSTRAINT_TRIGGERS = [
+  { name: "orders_confirmed_payment_guard", table: "orders", tgtype: 1 | 16, function: "orders_check_confirmed_payment" },
+  { name: "payments_primary_guard", table: "payments", tgtype: 1 | 4 | 16, function: "payments_check_primary_confirmed" },
+];

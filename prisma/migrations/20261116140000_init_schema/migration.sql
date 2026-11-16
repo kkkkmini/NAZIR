@@ -2,15 +2,21 @@
 --
 -- Generated with:
 --   prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script
--- and then edited by hand in exactly TWO places (everything else is verbatim Prisma output):
+-- and then edited by hand in exactly THREE places (everything else is verbatim Prisma output):
 --   1. Removed "CREATE SCHEMA IF NOT EXISTS public" (public always exists; the statement can fail
 --      for roles without CREATE on the database).
 --   2. seats_venue_section_row_number_nnd_uq is created as UNIQUE ... NULLS NOT DISTINCT
 --      (DATABASE.md §4.4, PostgreSQL 15+). Prisma cannot express it; the index is declared in
 --      schema.prisma only so that Prisma does not DROP it as drift. Verified by MIG-05.
+--   3. The whole script is wrapped in BEGIN; ... COMMIT; (S1). Prisma Migrate does NOT run a
+--      migration in a transaction: without the wrapper a failure leaves the statements that ran before
+--      it in the database (verified, tests MIG-09/MIG-10). Every migration in this repository must
+--      carry the wrapper; see docs/DATABASE.md §19.9 for recovery after a failed migration.
 --
--- CHECK constraints, partial unique indexes and the order_items trigger live in the next
--- migration (20261116140100_integrity_constraints).
+-- CHECK constraints, partial unique indexes, the order_items trigger and the payment/order
+-- consistency triggers live in the next migration (20261116140100_integrity_constraints).
+
+BEGIN;
 
 -- CreateTable
 CREATE TABLE "venues" (
@@ -534,6 +540,9 @@ CREATE INDEX "identity_verifications_status_expires_idx" ON "identity_verificati
 CREATE UNIQUE INDEX "identity_verifications_provider_txn_uq" ON "identity_verifications"("provider", "provider_transaction_id");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "identity_verifications_id_subject_purpose_uq" ON "identity_verifications"("id", "identity_subject_id", "purpose");
+
+-- CreateIndex
 CREATE INDEX "identity_sessions_subject_status_idx" ON "identity_sessions"("identity_subject_id", "status");
 
 -- CreateIndex
@@ -565,6 +574,9 @@ CREATE UNIQUE INDEX "orders_confirmed_payment_id_uq" ON "orders"("confirmed_paym
 
 -- CreateIndex
 CREATE UNIQUE INDEX "orders_id_session_uq" ON "orders"("id", "show_session_id");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "orders_id_total_uq" ON "orders"("id", "total_amount");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "order_items_order_seat_uq" ON "order_items"("order_id", "session_seat_id");
@@ -696,7 +708,7 @@ ALTER TABLE "session_seats" ADD CONSTRAINT "session_seats_sold_item_seat_fk" FOR
 ALTER TABLE "identity_verifications" ADD CONSTRAINT "identity_verifications_subject_fk" FOREIGN KEY ("identity_subject_id") REFERENCES "identity_subjects"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_verification_fk" FOREIGN KEY ("identity_verification_id") REFERENCES "identity_verifications"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
+ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_verification_subject_purpose_fk" FOREIGN KEY ("identity_verification_id", "identity_subject_id", "purpose") REFERENCES "identity_verifications"("id", "identity_subject_id", "purpose") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
 ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_subject_fk" FOREIGN KEY ("identity_subject_id") REFERENCES "identity_subjects"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
@@ -712,6 +724,9 @@ ALTER TABLE "orders" ADD CONSTRAINT "orders_show_session_fk" FOREIGN KEY ("show_
 
 -- AddForeignKey
 ALTER TABLE "orders" ADD CONSTRAINT "orders_subject_fk" FOREIGN KEY ("identity_subject_id") REFERENCES "identity_subjects"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
+
+-- AddForeignKey
+ALTER TABLE "orders" ADD CONSTRAINT "orders_quota_fk" FOREIGN KEY ("identity_subject_id", "show_session_id") REFERENCES "purchase_quotas"("identity_subject_id", "show_session_id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
 ALTER TABLE "orders" ADD CONSTRAINT "orders_identity_session_subject_fk" FOREIGN KEY ("identity_session_id", "identity_subject_id") REFERENCES "identity_sessions"("id", "identity_subject_id") ON DELETE RESTRICT ON UPDATE RESTRICT;
@@ -744,7 +759,7 @@ ALTER TABLE "seat_status_logs" ADD CONSTRAINT "seat_status_logs_admin_fk" FOREIG
 ALTER TABLE "order_access_sessions" ADD CONSTRAINT "order_access_sessions_order_fk" FOREIGN KEY ("order_id") REFERENCES "orders"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "payments" ADD CONSTRAINT "payments_order_fk" FOREIGN KEY ("order_id") REFERENCES "orders"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
+ALTER TABLE "payments" ADD CONSTRAINT "payments_order_total_fk" FOREIGN KEY ("order_id", "requested_amount") REFERENCES "orders"("id", "total_amount") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
 ALTER TABLE "payment_webhook_events" ADD CONSTRAINT "payment_webhook_events_payment_fk" FOREIGN KEY ("payment_id") REFERENCES "payments"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
@@ -791,3 +806,4 @@ ALTER TABLE "review_cases" ADD CONSTRAINT "review_cases_assigned_admin_fk" FOREI
 -- AddForeignKey
 ALTER TABLE "review_cases" ADD CONSTRAINT "review_cases_resolved_by_fk" FOREIGN KEY ("resolved_by_admin_id") REFERENCES "admins"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
+COMMIT;
