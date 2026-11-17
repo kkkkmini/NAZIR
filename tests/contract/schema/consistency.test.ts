@@ -69,7 +69,7 @@ describe("S3 — order <-> payment consistency", () => {
         // the order already points at the payment while it is still READY ...
         await update(c, "orders", order.id, { status: "PAID", confirmed_payment_id: payment.id, paid_at: new Date() });
         // ... and becomes PRIMARY afterwards, in the same transaction
-        await update(c, "payments", payment.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000 });
+        await update(c, "payments", payment.id, { status: "SUCCEEDED", role: "PRIMARY", approved_amount: 100000, approved_at: new Date() });
         await checkAtCommit(c);
       }));
 
@@ -420,7 +420,8 @@ describe("Q-022 — payments.method_type OTHER", () => {
       await c.query(`UPDATE payments SET status = 'CONFIRMING', confirm_started_at = now() WHERE id = $1`, [p.id]);
       await expectDbError(c, `UPDATE payments SET method_type = 'OTHER' WHERE id = $1`, [p.id], bad); // still CONFIRMING
       await c.query(
-        `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', method_type = 'OTHER', approved_amount = 100000 WHERE id = $1`,
+        `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', method_type = 'OTHER', provider_method_raw = '가상계좌',
+                          approved_amount = 100000, approved_at = now() WHERE id = $1`,
         [p.id],
       );
     }));
@@ -630,7 +631,7 @@ describe("A-038 — payments is a ledger: rows are never deleted", () => {
       const b = await mkPayment(c, order.id); // READY -> CANCELED (a discarded attempt is CANCELED, not deleted)
       await update(c, "payments", b.id, { status: "CANCELED", canceled_at: new Date() });
       const f = await mkPayment(c, order.id, { status: "FAILED" }); // FAILED -> SUCCEEDED (late approval found by a re-query)
-      await update(c, "payments", f.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
+      await update(c, "payments", f.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000, approved_at: new Date() });
       await confirmOrder(c, await orderFor(c, w, "u2")); // normal confirmation
     });
     const w = await mkWorld(db);
@@ -672,9 +673,9 @@ describe("A-038 — a SUCCEEDED payment carries a positive approved_amount", () 
       const w = await mkWorld(c);
       const order = await orderFor(c, w);
       const p = await mkPayment(c, order.id);
-      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS' WHERE id = $1`, [p.id], bad);
-      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 0 WHERE id = $1`, [p.id], bad);
-      await c.query(`UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 100000 WHERE id = $1`, [p.id]); // one statement
+      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_at = now() WHERE id = $1`, [p.id], bad);
+      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 0, approved_at = now() WHERE id = $1`, [p.id], bad);
+      await c.query(`UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 100000, approved_at = now() WHERE id = $1`, [p.id]); // one statement
       await expectDbError(c, `UPDATE payments SET approved_amount = NULL WHERE id = $1`, [p.id], bad);
       await expectDbError(c, `UPDATE payments SET approved_amount = 0 WHERE id = $1`, [p.id], bad);
     }));

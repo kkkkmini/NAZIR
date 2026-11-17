@@ -179,12 +179,12 @@ model IdentityVerification {
 
   identitySubject IdentitySubject?  @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_verifications_subject_fk")
   // DB enforces at most one session per verification (identity_sessions.identity_verification_id UNIQUE);
-  // Prisma needs a unique over all three composite-FK columns to call it 1:1, hence the list.
+  // Prisma needs a unique over all four composite-FK columns to call it 1:1, hence the list.
   sessions        IdentitySession[]
 
   @@unique([provider, providerTransactionId], map: "identity_verifications_provider_txn_uq")
-  // target of identity_sessions (identity_verification_id, identity_subject_id, purpose) composite FK (Q-024)
-  @@unique([id, identitySubjectId, purpose], map: "identity_verifications_id_subject_purpose_uq")
+  // target of the identity_sessions claim FK: (verification, subject, purpose, browser binding) must all match (A-040)
+  @@unique([id, identitySubjectId, purpose, browserBindingHash], map: "identity_verifications_id_subject_purpose_binding_uq")
   @@index([browserBindingHash, createdAt], map: "identity_verifications_binding_created_idx")
   @@index([status, expiresAt], map: "identity_verifications_status_expires_idx")
   @@map("identity_verifications")
@@ -204,8 +204,8 @@ model IdentitySession {
   createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  // a session carries exactly the subject and purpose of the verification it claims (Q-024)
-  verification IdentityVerification @relation(fields: [identityVerificationId, identitySubjectId, purpose], references: [id, identitySubjectId, purpose], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_verification_subject_purpose_fk")
+  // a session carries exactly the subject, purpose and BROWSER BINDING of the verification it claims (Q-024, A-040)
+  verification IdentityVerification @relation(fields: [identityVerificationId, identitySubjectId, purpose, browserBindingHash], references: [id, identitySubjectId, purpose, browserBindingHash], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_verification_claim_fk")
   subject      IdentitySubject      @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_subject_fk")
   orders       Order[]
 
@@ -412,35 +412,37 @@ model IdempotencyRecord {
 // ───────────────────────────── 결제 및 환불 (§7) ─────────────────────────────
 
 model Payment {
-  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId            String    @map("order_id") @db.Uuid
-  provider           String    @db.VarChar(50)
-  merchantPaymentRef String    @map("merchant_payment_ref") @db.VarChar(64)
-  providerPaymentId  String?   @map("provider_payment_id") @db.VarChar(200)
-  pgTransactionId    String?   @map("pg_transaction_id") @db.VarChar(200)
-  status             String    @db.VarChar(30) // CHECK: READY | CONFIRMING | UNKNOWN | SUCCEEDED | FAILED | CANCELED
-  role               String?   @db.VarChar(20) // CHECK: PRIMARY | EXCESS ; set iff status = SUCCEEDED
-  methodType         String    @map("method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY | OTHER; OTHER only for SUCCEEDED + EXCESS (D-005, Q-022)
-  easyPayProvider    String?   @map("easy_pay_provider") @db.VarChar(50)
-  cardCompany        String?   @map("card_company") @db.VarChar(50)
-  requestedAmount    BigInt    @map("requested_amount") // CHECK > 0
-  approvedAmount     BigInt?   @map("approved_amount") // CHECK NULL or >= 0
-  refundedAmount     BigInt    @default(0) @map("refunded_amount") // CHECK 0 <= refunded <= COALESCE(approved, 0)
-  currency           String    @default("KRW") @db.Char(3)
-  returnNonceHash    String    @map("return_nonce_hash") @db.VarChar(255)
-  checkoutExpiresAt  DateTime  @map("checkout_expires_at") @db.Timestamptz(6)
-  confirmStartedAt   DateTime? @map("confirm_started_at") @db.Timestamptz(6)
-  unknownSince       DateTime? @map("unknown_since") @db.Timestamptz(6)
-  nextRequeryAt      DateTime? @map("next_requery_at") @db.Timestamptz(6)
-  requeryCount       Int       @default(0) @map("requery_count")
-  lastVerifiedAt     DateTime? @map("last_verified_at") @db.Timestamptz(6)
-  approvedAt         DateTime? @map("approved_at") @db.Timestamptz(6)
-  failedAt           DateTime? @map("failed_at") @db.Timestamptz(6)
-  canceledAt         DateTime? @map("canceled_at") @db.Timestamptz(6)
-  failureCode        String?   @map("failure_code") @db.VarChar(100)
-  failureMessage     String?   @map("failure_message")
-  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId             String    @map("order_id") @db.Uuid
+  provider            String    @db.VarChar(50)
+  merchantPaymentRef  String    @map("merchant_payment_ref") @db.VarChar(64)
+  providerPaymentId   String?   @map("provider_payment_id") @db.VarChar(200)
+  pgTransactionId     String?   @map("pg_transaction_id") @db.VarChar(200)
+  status              String    @db.VarChar(30) // CHECK: READY | CONFIRMING | UNKNOWN | SUCCEEDED | FAILED | CANCELED
+  role                String?   @db.VarChar(20) // CHECK: PRIMARY | EXCESS ; set iff status = SUCCEEDED
+  methodType          String    @map("method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY | OTHER; OTHER only for SUCCEEDED + EXCESS (D-005, Q-022). Normalised effective method: requested until approval, then the PG-reported one
+  requestedMethodType String    @map("requested_method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY. What the user chose when the attempt was created; immutable (trigger) (A-039)
+  providerMethodRaw   String?   @map("provider_method_raw") @db.VarChar(100) // PG-reported method label, verbatim; required when method_type = OTHER; format-guarded (A-039)
+  easyPayProvider     String?   @map("easy_pay_provider") @db.VarChar(50)
+  cardCompany         String?   @map("card_company") @db.VarChar(50)
+  requestedAmount     BigInt    @map("requested_amount") // CHECK > 0
+  approvedAmount      BigInt?   @map("approved_amount") // CHECK NULL or >= 0
+  refundedAmount      BigInt    @default(0) @map("refunded_amount") // CHECK 0 <= refunded <= COALESCE(approved, 0)
+  currency            String    @default("KRW") @db.Char(3)
+  returnNonceHash     String    @map("return_nonce_hash") @db.VarChar(255)
+  checkoutExpiresAt   DateTime  @map("checkout_expires_at") @db.Timestamptz(6)
+  confirmStartedAt    DateTime? @map("confirm_started_at") @db.Timestamptz(6)
+  unknownSince        DateTime? @map("unknown_since") @db.Timestamptz(6)
+  nextRequeryAt       DateTime? @map("next_requery_at") @db.Timestamptz(6)
+  requeryCount        Int       @default(0) @map("requery_count")
+  lastVerifiedAt      DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  approvedAt          DateTime? @map("approved_at") @db.Timestamptz(6)
+  failedAt            DateTime? @map("failed_at") @db.Timestamptz(6)
+  canceledAt          DateTime? @map("canceled_at") @db.Timestamptz(6)
+  failureCode         String?   @map("failure_code") @db.VarChar(100)
+  failureMessage      String?   @map("failure_message")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   // requested_amount must equal the order's total_amount (S3 rule 7); the FK also guarantees the order exists.
   order Order @relation("PaymentOrder", fields: [orderId, requestedAmount], references: [id, totalAmount], onDelete: Restrict, onUpdate: Restrict, map: "payments_order_total_fk")

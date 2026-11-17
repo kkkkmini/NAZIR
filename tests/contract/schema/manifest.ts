@@ -24,6 +24,7 @@ import {
   OUTBOX_STATUS,
   PAYMENT_LOG_SOURCE,
   PAYMENT_METHOD_TYPE,
+  PAYMENT_REQUEST_METHOD_TYPE,
   PAYMENT_ROLE,
   PAYMENT_STATUS,
   REFUND_STATUS,
@@ -126,7 +127,7 @@ export const UNIQUES: UniqueSpec[] = [
   { name: "session_seats_session_seat_uq", table: "session_seats", columns: ["show_session_id", "seat_id"] },
   { name: "session_seats_sold_order_item_id_uq", table: "session_seats", columns: ["sold_order_item_id"] },
   { name: "identity_subjects_key_uq", table: "identity_subjects", columns: ["subject_key_type", "key_version", "subject_key_hash"] },
-  { name: "identity_verifications_id_subject_purpose_uq", table: "identity_verifications", columns: ["id", "identity_subject_id", "purpose"] },
+  { name: "identity_verifications_id_subject_purpose_binding_uq", table: "identity_verifications", columns: ["id", "identity_subject_id", "purpose", "browser_binding_hash"] },
   { name: "orders_id_total_uq", table: "orders", columns: ["id", "total_amount"] },
   { name: "identity_verifications_provider_txn_uq", table: "identity_verifications", columns: ["provider", "provider_transaction_id"] },
   { name: "identity_sessions_verification_uq", table: "identity_sessions", columns: ["identity_verification_id"] },
@@ -203,6 +204,10 @@ export const CHECKS: CheckSpec[] = [
   vocab("payments", "role", PAYMENT_ROLE),
   { name: "payments_method_type_ck", table: "payments", columns: ["method_type"], vocab: PAYMENT_METHOD_TYPE, rule: "D-005, Q-022: CARD / EASY_PAY / OTHER" },
   { name: "payments_method_type_other_ck", table: "payments", columns: ["method_type", "status", "role"], rule: "Q-022: OTHER only for SUCCEEDED + EXCESS" },
+  { name: "payments_succeeded_approved_at_ck", table: "payments", columns: ["status", "approved_at"], rule: "A-038: SUCCEEDED carries its approval time" },
+  { name: "payments_requested_method_type_ck", table: "payments", columns: ["requested_method_type"], vocab: PAYMENT_REQUEST_METHOD_TYPE, rule: "A-039: what the user chose" },
+  { name: "payments_other_requires_raw_ck", table: "payments", columns: ["method_type", "provider_method_raw"], rule: "A-039: OTHER keeps the PG label" },
+  { name: "payments_provider_method_raw_ck", table: "payments", columns: ["provider_method_raw"], rule: "A-039: no personal / payment data in the raw label" },
   { name: "payments_succeeded_amount_ck", table: "payments", columns: ["status", "approved_amount"], rule: "A-038: SUCCEEDED carries a positive approved amount" },
   { name: "payments_primary_amount_ck", table: "payments", columns: ["role", "approved_amount", "requested_amount"], rule: "S3: PRIMARY approved = requested" },
   vocab("payment_webhook_events", "status", WEBHOOK_EVENT_STATUS),
@@ -249,7 +254,7 @@ export interface CompositeFk {
 
 export const COMPOSITE_FKS: CompositeFk[] = [
   { name: "show_sessions_show_venue_fk", table: "show_sessions", columns: ["show_id", "venue_id"], refTable: "shows", refColumns: ["id", "venue_id"], rule: "session venue = show venue" },
-  { name: "identity_sessions_verification_subject_purpose_fk", table: "identity_sessions", columns: ["identity_verification_id", "identity_subject_id", "purpose"], refTable: "identity_verifications", refColumns: ["id", "identity_subject_id", "purpose"], rule: "Q-024: session subject + purpose = verification's" },
+  { name: "identity_sessions_verification_claim_fk", table: "identity_sessions", columns: ["identity_verification_id", "identity_subject_id", "purpose", "browser_binding_hash"], refTable: "identity_verifications", refColumns: ["id", "identity_subject_id", "purpose", "browser_binding_hash"], rule: "Q-024, A-040: session subject + purpose + browser binding = verification's" },
   { name: "orders_quota_fk", table: "orders", columns: ["identity_subject_id", "show_session_id"], refTable: "purchase_quotas", refColumns: ["identity_subject_id", "show_session_id"], rule: "S4: an order needs its quota row" },
   { name: "payments_order_total_fk", table: "payments", columns: ["order_id", "requested_amount"], refTable: "orders", refColumns: ["id", "total_amount"], rule: "S3: requested_amount = order total" },
   { name: "session_seats_session_venue_fk", table: "session_seats", columns: ["show_session_id", "venue_id"], refTable: "show_sessions", refColumns: ["id", "venue_id"], rule: "5" },
@@ -307,6 +312,15 @@ export const IMMUTABLE_TRIGGERS = [
   { name: "order_items_no_update", table: "order_items", tgtype: 1 | 2 | 16, function: "order_items_reject_change" },
   { name: "order_items_no_delete", table: "order_items", tgtype: 1 | 2 | 8, function: "order_items_reject_change" },
   { name: "payments_no_delete", table: "payments", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "payments_requested_method_no_change", table: "payments", tgtype: 1 | 2 | 16, function: "payments_reject_requested_method_change" }, // A-039
+  // A-041 (Q-029): append-only history and the refund ledger
+  { name: "admin_audit_logs_no_update", table: "admin_audit_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "admin_audit_logs_no_delete", table: "admin_audit_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "payment_status_logs_no_update", table: "payment_status_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "payment_status_logs_no_delete", table: "payment_status_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "refund_items_no_update", table: "refund_items", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "refund_items_no_delete", table: "refund_items", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "refunds_no_delete", table: "refunds", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
 ];
 
 /**
@@ -316,4 +330,7 @@ export const IMMUTABLE_TRIGGERS = [
 export const CONSTRAINT_TRIGGERS = [
   { name: "orders_confirmed_payment_guard", table: "orders", tgtype: 1 | 16, function: "orders_check_confirmed_payment" },
   { name: "payments_primary_guard", table: "payments", tgtype: 1 | 4 | 16, function: "payments_check_primary_confirmed" },
+  // A-040: identity claim consistency. tgtype: ROW(1) | INSERT(4) | DELETE(8) | UPDATE(16)
+  { name: "identity_sessions_claim_guard", table: "identity_sessions", tgtype: 1 | 4 | 8 | 16, function: "identity_sessions_check_claimed" },
+  { name: "identity_verifications_claim_guard", table: "identity_verifications", tgtype: 1 | 4 | 16, function: "identity_verifications_check_consumed" },
 ];

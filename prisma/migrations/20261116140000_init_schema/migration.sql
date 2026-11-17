@@ -289,6 +289,8 @@ CREATE TABLE "payments" (
     "status" VARCHAR(30) NOT NULL,
     "role" VARCHAR(20),
     "method_type" VARCHAR(20) NOT NULL,
+    "requested_method_type" VARCHAR(20) NOT NULL,
+    "provider_method_raw" VARCHAR(100),
     "easy_pay_provider" VARCHAR(50),
     "card_company" VARCHAR(50),
     "requested_amount" BIGINT NOT NULL,
@@ -540,7 +542,7 @@ CREATE INDEX "identity_verifications_status_expires_idx" ON "identity_verificati
 CREATE UNIQUE INDEX "identity_verifications_provider_txn_uq" ON "identity_verifications"("provider", "provider_transaction_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "identity_verifications_id_subject_purpose_uq" ON "identity_verifications"("id", "identity_subject_id", "purpose");
+CREATE UNIQUE INDEX "identity_verifications_id_subject_purpose_binding_uq" ON "identity_verifications"("id", "identity_subject_id", "purpose", "browser_binding_hash");
 
 -- CreateIndex
 CREATE INDEX "identity_sessions_subject_status_idx" ON "identity_sessions"("identity_subject_id", "status");
@@ -708,7 +710,7 @@ ALTER TABLE "session_seats" ADD CONSTRAINT "session_seats_sold_item_seat_fk" FOR
 ALTER TABLE "identity_verifications" ADD CONSTRAINT "identity_verifications_subject_fk" FOREIGN KEY ("identity_subject_id") REFERENCES "identity_subjects"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
-ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_verification_subject_purpose_fk" FOREIGN KEY ("identity_verification_id", "identity_subject_id", "purpose") REFERENCES "identity_verifications"("id", "identity_subject_id", "purpose") ON DELETE RESTRICT ON UPDATE RESTRICT;
+ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_verification_claim_fk" FOREIGN KEY ("identity_verification_id", "identity_subject_id", "purpose", "browser_binding_hash") REFERENCES "identity_verifications"("id", "identity_subject_id", "purpose", "browser_binding_hash") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 -- AddForeignKey
 ALTER TABLE "identity_sessions" ADD CONSTRAINT "identity_sessions_subject_fk" FOREIGN KEY ("identity_subject_id") REFERENCES "identity_subjects"("id") ON DELETE RESTRICT ON UPDATE RESTRICT;

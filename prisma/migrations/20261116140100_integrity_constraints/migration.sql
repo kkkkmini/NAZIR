@@ -5,9 +5,11 @@
 --                                               in-flight payment / PRIMARY payment / valid ticket /
 --                                               open review case
 --   B. CHECK constraints                      — state vocabularies, amounts, quota, ownership
---   C. ledger protection triggers        (3)  — order_items: UPDATE and DELETE are rejected (rule 14, Q-023);
---                                               payments: DELETE is rejected (A-038)
+--   C. ledger / append-only protection       — order_items (rule 14, Q-023), payments (A-038), payments.requested_method_type
+--                                               (A-039), admin_audit_logs / payment_status_logs / refund_items /
+--                                               refunds (A-041)
 --   D. Order <-> payment consistency     (2)  — DEFERRED constraint triggers (S3)
+--   E. Identity claim consistency        (2)  — DEFERRED constraint triggers (A-040)
 --
 -- The whole script runs inside one explicit transaction (S1): Prisma Migrate does not wrap a
 -- migration in a transaction itself, so a failure would otherwise leave the earlier statements applied.
@@ -206,6 +208,29 @@ ALTER TABLE "payments"
   ADD CONSTRAINT "payments_method_type_other_ck"
   CHECK ("method_type" <> 'OTHER' OR ("status" = 'SUCCEEDED' AND "role" IS NOT DISTINCT FROM 'EXCESS'));
 
+-- A-039 (Q-027): what the user asked for and what the PG reported are different facts and are stored separately.
+--   requested_method_type  the method chosen when the attempt was created; immutable (trigger below)
+--   method_type            normalised effective method: the requested one until approval, then the PG-reported one
+--   provider_method_raw    the PG-reported method label, verbatim; mandatory when method_type = OTHER
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_requested_method_type_ck"
+  CHECK ("requested_method_type" IN ('CARD', 'EASY_PAY'));
+
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_other_requires_raw_ck"
+  CHECK ("method_type" <> 'OTHER' OR "provider_method_raw" IS NOT NULL);
+
+-- The raw label is a short method name ("카드", "가상계좌", ...), never personal or payment data. The DB rejects values
+-- that look like it: blank, 9+ consecutive digits (card / phone / account numbers), an e-mail marker, control chars.
+-- Nothing is transformed: the value is stored exactly as the adapter passes it.
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_provider_method_raw_ck"
+  CHECK ("provider_method_raw" IS NULL
+         OR (btrim("provider_method_raw") <> ''
+             AND "provider_method_raw" !~ '[0-9]{9,}'
+             AND "provider_method_raw" !~ '@'
+             AND "provider_method_raw" !~ '[[:cntrl:]]'));
+
 -- S3: a PRIMARY payment was approved for exactly the amount requested. Together with the composite FK
 -- payments_order_total_fk (requested_amount = orders.total_amount) this means approved = order total.
 -- NULL-safe: a PRIMARY payment without an approved amount is rejected.
@@ -230,6 +255,13 @@ ALTER TABLE "payments"
 ALTER TABLE "payments"
   ADD CONSTRAINT "payments_succeeded_role_ck"
   CHECK (("status" = 'SUCCEEDED') = ("role" IS NOT NULL));
+
+-- A-038: SUCCEEDED also carries the approval time. A SUCCEEDED row without it is an incomplete payment record;
+-- the transition to SUCCEEDED sets status, role, approved_amount and approved_at in the same UPDATE (DATABASE.md §11.7).
+-- NULL-safe by construction: "approved_at IS NOT NULL" can never be NULL.
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_succeeded_approved_at_ck"
+  CHECK ("status" <> 'SUCCEEDED' OR "approved_at" IS NOT NULL);
 
 -- A-038: SUCCEEDED means "the PG approved this payment", so the approved amount must be recorded and positive.
 -- Without it the refund cap (payments_refunded_amount_ck uses COALESCE(approved_amount, 0)) would make an approved
@@ -344,6 +376,47 @@ CREATE TRIGGER "payments_no_delete"
   FOR EACH ROW
   EXECUTE FUNCTION "ledger_reject_delete"();
 
+-- A-039: the user's original choice can never be rewritten (it is evidence). A WHEN clause keeps the trigger silent for
+-- every UPDATE that leaves the column alone.
+CREATE FUNCTION "payments_reject_requested_method_change"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'payments.requested_method_type is immutable (id=%, % -> %)', OLD."id", OLD."requested_method_type", NEW."requested_method_type"
+    USING ERRCODE = 'restrict_violation',
+          HINT = 'Record the PG-reported method in method_type / provider_method_raw instead.';
+END;
+$$;
+
+CREATE TRIGGER "payments_requested_method_no_change"
+  BEFORE UPDATE OF "requested_method_type" ON "payments"
+  FOR EACH ROW
+  WHEN (OLD."requested_method_type" IS DISTINCT FROM NEW."requested_method_type")
+  EXECUTE FUNCTION "payments_reject_requested_method_change"();
+
+-- A-041 (Q-029): append-only audit / history tables and the refund ledger.
+--   admin_audit_logs      UPDATE + DELETE rejected   (A-022: audit log is P0)
+--   payment_status_logs   UPDATE + DELETE rejected
+--   refund_items          UPDATE + DELETE rejected   (created with the refund request, never edited)
+--   refunds               DELETE rejected; status UPDATEs are the normal lifecycle (REQUESTED -> VERIFYING -> ...)
+-- Deliberately NOT covered here (decided per Step once their real write patterns are known): tickets, orders,
+-- seat_holds, order_status_logs, seat_status_logs, payment_webhook_events.
+CREATE FUNCTION "ledger_reject_update"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION '% rows are append-only: UPDATE rejected (id=%)', TG_TABLE_NAME, OLD."id"
+    USING ERRCODE = 'restrict_violation',
+          HINT = 'Append a new row instead of editing history.';
+END;
+$$;
+
+CREATE TRIGGER "admin_audit_logs_no_update" BEFORE UPDATE ON "admin_audit_logs" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_update"();
+CREATE TRIGGER "admin_audit_logs_no_delete" BEFORE DELETE ON "admin_audit_logs" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_delete"();
+CREATE TRIGGER "payment_status_logs_no_update" BEFORE UPDATE ON "payment_status_logs" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_update"();
+CREATE TRIGGER "payment_status_logs_no_delete" BEFORE DELETE ON "payment_status_logs" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_delete"();
+CREATE TRIGGER "refund_items_no_update" BEFORE UPDATE ON "refund_items" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_update"();
+CREATE TRIGGER "refund_items_no_delete" BEFORE DELETE ON "refund_items" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_delete"();
+CREATE TRIGGER "refunds_no_delete" BEFORE DELETE ON "refunds" FOR EACH ROW EXECUTE FUNCTION "ledger_reject_delete"();
+
 -- ═════════════════════════════ D. order <-> payment consistency (S3) ═════════════════════════════
 --
 -- Invariants (DATABASE.md §5.1, §7.1; "PRIMARY = the approved payment used to confirm the order,
@@ -436,5 +509,79 @@ CREATE CONSTRAINT TRIGGER "payments_primary_guard"
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW
   EXECUTE FUNCTION "payments_check_primary_confirmed"();
+
+-- ═════════════════════════════ E. identity claim consistency (A-040, Q-028) ═════════════════════════════
+--
+-- The claim (DATABASE.md §6.2, API_SPEC "Claim") exchanges a VERIFIED verification for exactly one session and marks the
+-- verification CONSUMED in the same transaction. The composite FK identity_sessions_verification_claim_fk already forces
+-- the session's subject, purpose and BROWSER BINDING to equal the verification's. These two DEFERRED constraint
+-- triggers check the FINAL state at COMMIT, so the claim may write its two rows in either order:
+--   * a session exists            =>  its verification is CONSUMED   (never PENDING / VERIFIED / FAILED / EXPIRED)
+--   * a verification is CONSUMED  =>  its session exists            (single use, no orphan)
+-- Not checked here on purpose: claim_expires_at (a time policy; the service validates it, DATABASE.md §6.2), and no
+-- CHECK restricts the subject of PENDING / FAILED rows. Sessions keep their own lifecycle (ACTIVE / REVOKED / EXPIRED).
+--
+-- Retention note: orders.identity_session_id is ON DELETE RESTRICT, so a session that created an order (and therefore its
+-- verification) can never be deleted; personal data in it is removed by UPDATE (verified_name / verified_phone), which
+-- these triggers do not interfere with. An unreferenced verification is purged together with its session in ONE
+-- transaction (delete the session, then the verification); deleting only the session is rejected at COMMIT.
+CREATE FUNCTION "identity_assert_claim_consistent"(vid uuid) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+  st text;
+  has_session boolean;
+BEGIN
+  SELECT v."status" INTO st FROM "identity_verifications" v WHERE v."id" = vid;
+  IF NOT FOUND THEN
+    RETURN; -- the verification itself was purged in this transaction
+  END IF;
+  SELECT EXISTS (SELECT 1 FROM "identity_sessions" s WHERE s."identity_verification_id" = vid) INTO has_session;
+
+  IF has_session AND st <> 'CONSUMED' THEN
+    RAISE EXCEPTION 'identity verification % has a session but is % (a session needs a CONSUMED verification)', vid, st
+      USING ERRCODE = 'check_violation', TABLE = 'identity_sessions', CONSTRAINT = 'identity_sessions_verification_consumed_ck';
+  ELSIF st = 'CONSUMED' AND NOT has_session THEN
+    RAISE EXCEPTION 'identity verification % is CONSUMED but no session was issued for it', vid
+      USING ERRCODE = 'check_violation', TABLE = 'identity_verifications', CONSTRAINT = 'identity_verifications_consumed_session_ck';
+  END IF;
+END;
+$$;
+
+CREATE FUNCTION "identity_sessions_check_claimed"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM "identity_assert_claim_consistent"(OLD."identity_verification_id");
+  ELSE
+    PERFORM "identity_assert_claim_consistent"(NEW."identity_verification_id");
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD."identity_verification_id" IS DISTINCT FROM NEW."identity_verification_id" THEN
+        PERFORM "identity_assert_claim_consistent"(OLD."identity_verification_id"); -- it lost its session
+      END IF;
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER "identity_sessions_claim_guard"
+  AFTER INSERT OR UPDATE OF "identity_verification_id" OR DELETE ON "identity_sessions"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "identity_sessions_check_claimed"();
+
+CREATE FUNCTION "identity_verifications_check_consumed"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM "identity_assert_claim_consistent"(NEW."id");
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER "identity_verifications_claim_guard"
+  AFTER INSERT OR UPDATE OF "status" ON "identity_verifications"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "identity_verifications_check_consumed"();
 
 COMMIT;

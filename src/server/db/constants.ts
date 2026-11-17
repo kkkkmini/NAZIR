@@ -111,8 +111,16 @@ export const DB_CONSTRAINT = {
   paymentMethodOtherCheck: "payments_method_type_other_ck",
   /** CHECK: a SUCCEEDED payment carries a positive approved_amount (A-038). */
   paymentSucceededAmountCheck: "payments_succeeded_amount_ck",
-  /** FK: identity session = its verification's subject and purpose (Q-024). */
-  identitySessionVerificationFk: "identity_sessions_verification_subject_purpose_fk",
+  /** FK: identity session = its verification's subject, purpose AND browser binding (Q-024, A-040). */
+  identitySessionVerificationFk: "identity_sessions_verification_claim_fk",
+  /** Deferred trigger errors (COMMIT, 23514): a session needs a CONSUMED verification / a CONSUMED verification needs its session. */
+  sessionNeedsConsumedVerification: "identity_sessions_verification_consumed_ck",
+  consumedVerificationNeedsSession: "identity_verifications_consumed_session_ck",
+  /** CHECKs added by A-038 / A-039. */
+  paymentSucceededApprovedAtCheck: "payments_succeeded_approved_at_ck",
+  requestedMethodTypeCheck: "payments_requested_method_type_ck",
+  otherRequiresRawCheck: "payments_other_requires_raw_ck",
+  providerMethodRawCheck: "payments_provider_method_raw_ck",
   /** Deferred constraint-trigger errors (raised at COMMIT with SQLSTATE 23514). */
   confirmedPaymentNotPrimary: "orders_confirmed_payment_primary_ck",
   confirmedPaymentDetached: "orders_confirmed_payment_detach_ck",

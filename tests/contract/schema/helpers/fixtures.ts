@@ -60,26 +60,21 @@ export const mkSubject = (q: Queryable, o: Row = {}) =>
 
 /** Creates a VERIFIED verification and the identity session claiming it. Returns the session row. */
 export async function mkIdentitySession(q: Queryable, subjectId: string, o: Row = {}) {
-  const v = await insert(q, "identity_verifications", {
-    purpose: "BOOKING",
-    provider: "MOCK",
-    provider_transaction_id: `txn-${rnd()}`,
-    browser_binding_hash: `bind-${rnd()}`,
-    state_nonce_hash: `nonce-${rnd()}`,
-    status: "CONSUMED",
-    identity_subject_id: subjectId,
-    expires_at: inMinutes(10),
-  });
-  return insert(q, "identity_sessions", {
-    identity_verification_id: v.id,
-    identity_subject_id: subjectId,
-    purpose: "BOOKING",
-    token_hash: `tok-${rnd()}`,
-    browser_binding_hash: v.browser_binding_hash,
-    status: "ACTIVE",
-    expires_at: inMinutes(30),
-    ...o,
-  });
+  // A claim (CONSUMED verification + its session) written by ONE statement: the deferred claim triggers (A-040) check the
+  // final state at commit, so this also works on a pool in autocommit mode.
+  const bind = `bind-${rnd()}`;
+  const { rows } = await q.query(
+    `WITH v AS (
+       INSERT INTO identity_verifications (purpose, provider, provider_transaction_id, browser_binding_hash, state_nonce_hash, status, identity_subject_id, expires_at)
+       VALUES ('BOOKING', 'MOCK', $1, $2, $3, 'CONSUMED', $4, $5) RETURNING id, browser_binding_hash)
+     INSERT INTO identity_sessions (identity_verification_id, identity_subject_id, purpose, token_hash, browser_binding_hash, status, expires_at)
+     SELECT v.id, $4, 'BOOKING', $6, v.browser_binding_hash, 'ACTIVE', $7 FROM v RETURNING *`,
+    [`txn-${rnd()}`, bind, `nonce-${rnd()}`, subjectId, inMinutes(10), `tok-${rnd()}`, inMinutes(30)],
+  );
+  const session = rows[0] as Row;
+  if (Object.keys(o).length === 0) return session;
+  await update(q, "identity_sessions", session.id, o);
+  return { ...session, ...o };
 }
 
 /**
@@ -120,8 +115,8 @@ export const mkOrderItem = (q: Queryable, ref: { orderId: string; sessionId: str
 export const mkHold = (q: Queryable, ref: { orderId: string; orderItemId: string; sessionSeatId: string }, o: Row = {}) =>
   insert(q, "seat_holds", { order_id: ref.orderId, order_item_id: ref.orderItemId, session_seat_id: ref.sessionSeatId, status: "ACTIVE", ...o });
 
-export const mkPayment = (q: Queryable, orderId: string, o: Row = {}) =>
-  insert(q, "payments", {
+export const mkPayment = (q: Queryable, orderId: string, o: Row = {}) => {
+  const row: Row = {
     order_id: orderId,
     provider: "MOCK",
     merchant_payment_ref: `pay-${rnd()}${rnd()}`,
@@ -131,7 +126,15 @@ export const mkPayment = (q: Queryable, orderId: string, o: Row = {}) =>
     return_nonce_hash: `rn-${rnd()}`,
     checkout_expires_at: inMinutes(7),
     ...o,
-  });
+  };
+  // A-039: the requested method is always recorded; unless a test says otherwise it is the method used.
+  if (!("requested_method_type" in o)) row.requested_method_type = row.method_type === "EASY_PAY" ? "EASY_PAY" : "CARD";
+  // A-039: OTHER keeps the PG label.
+  if (row.method_type === "OTHER" && !("provider_method_raw" in o)) row.provider_method_raw = "가상계좌";
+  // A-038: a SUCCEEDED payment carries its approval time.
+  if (row.status === "SUCCEEDED" && !("approved_at" in o)) row.approved_at = new Date();
+  return insert(q, "payments", row);
+};
 
 /**
  * A confirmed order as Tx2 produces it (DATABASE.md §11.7): a SUCCEEDED PRIMARY payment for the order's total and the
