@@ -5,7 +5,8 @@
 --                                               in-flight payment / PRIMARY payment / valid ticket /
 --                                               open review case
 --   B. CHECK constraints                      — state vocabularies, amounts, quota, ownership
---   C. order_items immutability triggers (2)  — UPDATE and DELETE are rejected (rule 14, Q-023)
+--   C. ledger protection triggers        (3)  — order_items: UPDATE and DELETE are rejected (rule 14, Q-023);
+--                                               payments: DELETE is rejected (A-038)
 --   D. Order <-> payment consistency     (2)  — DEFERRED constraint triggers (S3)
 --
 -- The whole script runs inside one explicit transaction (S1): Prisma Migrate does not wrap a
@@ -230,6 +231,14 @@ ALTER TABLE "payments"
   ADD CONSTRAINT "payments_succeeded_role_ck"
   CHECK (("status" = 'SUCCEEDED') = ("role" IS NOT NULL));
 
+-- A-038: SUCCEEDED means "the PG approved this payment", so the approved amount must be recorded and positive.
+-- Without it the refund cap (payments_refunded_amount_ck uses COALESCE(approved_amount, 0)) would make an approved
+-- payment impossible to refund in the ledger. The transition to SUCCEEDED must set approved_amount in the same UPDATE.
+-- (COALESCE keeps the check NULL-safe: "NULL > 0" would otherwise let NULL through.)
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_succeeded_amount_ck"
+  CHECK ("status" <> 'SUCCEEDED' OR COALESCE("approved_amount", 0) > 0);
+
 ALTER TABLE "payment_webhook_events"
   ADD CONSTRAINT "payment_webhook_events_status_ck"
   CHECK ("status" IN ('RECEIVED', 'PROCESSING', 'PROCESSED', 'FAILED', 'IGNORED', 'UNMATCHED'));
@@ -315,6 +324,25 @@ CREATE TRIGGER "order_items_no_delete"
   BEFORE DELETE ON "order_items"
   FOR EACH ROW
   EXECUTE FUNCTION "order_items_reject_change"();
+
+-- payments is a money ledger (DATABASE.md §1.1 principle 3, §7.1): every attempt and every approval, including FAILED,
+-- CANCELED and EXCESS payments, is kept. A payment that must be discarded is moved to CANCELED / FAILED (§12.2); it is
+-- never deleted. Before this trigger an unreferenced payment row could be deleted (it was protected only by the
+-- incidental FK of its payment_status_logs rows, and those rows were deletable too). A generic function so that other
+-- ledger tables can reuse it once their scope is decided (see docs/DECISIONS.md Q-029).
+CREATE FUNCTION "ledger_reject_delete"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION '% rows are a ledger and are never deleted: DELETE rejected (id=%)', TG_TABLE_NAME, OLD."id"
+    USING ERRCODE = 'restrict_violation',
+          HINT = 'Record the outcome with a status change (e.g. CANCELED / FAILED) instead of deleting the row.';
+END;
+$$;
+
+CREATE TRIGGER "payments_no_delete"
+  BEFORE DELETE ON "payments"
+  FOR EACH ROW
+  EXECUTE FUNCTION "ledger_reject_delete"();
 
 -- ═════════════════════════════ D. order <-> payment consistency (S3) ═════════════════════════════
 --

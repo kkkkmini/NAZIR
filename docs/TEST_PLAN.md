@@ -55,6 +55,8 @@
 | MIG-14 | `method_type = OTHER`(Q-022): `SUCCEEDED`+`EXCESS`만 허용, `READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`/`PRIMARY` 거부, 허용 외 카드사·간편결제사 문자열 기록, `PRIMARY` 승격 UPDATE 거부 | 위 규칙대로 |
 | MIG-15 | `order_items` UPDATE·DELETE 차단(Q-023), 주문 생성 트랜잭션 롤백 시 항목이 남지 않음 | UPDATE·DELETE 모두 SQLSTATE `23001`, 롤백은 정상 |
 | MIG-16 | 타임스탬프 출처(D3): DB 기본값 `CURRENT_TIMESTAMP`, raw SQL의 DB 시각(트랜잭션 시작), raw UPDATE는 `updated_at` 불변, Prisma Client는 앱 시각을 명시 전송 | 실측과 일치(Prisma 업그레이드 시 변하면 실패) |
+| MIG-17 | 결제 원장 보존(A-038): 참조 없는 `READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`/`SUCCEEDED`+`EXCESS` 결제와 확정 `PRIMARY`·로그가 있는 결제의 DELETE(개별·벌크·실제 커밋), 상태 전이·INSERT·UPDATE는 계속 허용, 롤백된 생성은 행을 남기지 않음 | DELETE는 모두 SQLSTATE `23001`, 정상 전이는 허용 |
+| MIG-18 | `SUCCEEDED`의 양수 `approved_amount`(A-038): INSERT·UPDATE·NULL·0·전이 우회 | `SUCCEEDED`는 승인 금액 필수, 다른 상태는 NULL 허용, 승인된 결제는 환불 기록 가능 |
 
 **Step 2 구현 상태 (2026-11-16):** MIG-01~16 구현·통과. 실행: `TEST_DATABASE_URL=postgresql://… npm run test:db` (실제 PostgreSQL 15+ 필수, 미설정 시 건너뛰지 않고 실패). CI는 `.github/workflows/ci.yml`의 `db` job(`postgres:16` 서비스 컨테이너). 파일과 범위:
 
@@ -63,7 +65,7 @@
 | `tests/contract/schema/migrations.test.ts` | MIG-01(빈 DB에 `migrate deploy`, 재실행 멱등), MIG-02, MIG-03·**MIG-03b**(DB CHECK 어휘 = `src/server/db/constants.ts`), MIG-04(모든 FK RESTRICT 포함), MIG-05(카탈로그), MIG-06(정적 DROP 검사 + 합성 SQL로 검사기 검증), MIG-07, **DRIFT-01**, `DB_CONSTRAINT` 이름이 실제 DB 객체인지 검증, 음성 대조군(일부러 망가뜨린 DB에서 검사기가 위반을 검출) |
 | `tests/contract/schema/migration-safety.test.ts` | **MIG-09**(모든 migration 트랜잭션 래핑 + 검사기 검증), **MIG-10**(실제 Prisma CLI, 실제 migration에 실패 주입, 롤백·`P3009`·`resolve --rolled-back`·재시도, 래퍼 없는 음성 대조군) |
 | `tests/contract/schema/integrity.test.ts` | MIG-05(동작), MIG-08, 규칙 1~14의 동작 증명(SQLSTATE·제약 이름 단언), 실제 2커넥션 동시 INSERT, QTA-18·QTA-19·ORD-17 중 DB 수준 부분 |
-| `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK |
+| `tests/contract/schema/consistency.test.ts` | **MIG-11~15, 17, 18**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK, A-038 결제 원장·승인 금액 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
 | `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 |
 | `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) |
@@ -72,7 +74,7 @@
 
 ### 2.1 보완 구현의 공허성 검증
 
-새 제약이 실제로 잘못된 상태를 막는지 확인하기 위해 보호 장치를 하나씩 제거(뮤테이션)해 실행했다: `payments_primary_order_uq`, 지연 trigger 2개 각각, 지연 속성(`DEFERRABLE INITIALLY DEFERRED`) 제거, `payments_primary_amount_ck`, `payments_method_type_other_ck`, `order_items_no_delete`, `orders_quota_fk`, `payments_order_total_fk`(복합 → 단일 FK), `identity_sessions` 복합 FK(→ 단일 FK), migration 트랜잭션 래퍼 — **11개 모두** 해당 영역 테스트가 실패했다. 새 제약을 추가·변경할 때는 같은 방식으로 제거 시험을 한다.
+새 제약이 실제로 잘못된 상태를 막는지 확인하기 위해 보호 장치를 하나씩 제거(뮤테이션)해 실행했다: `payments_primary_order_uq`, 지연 trigger 2개 각각, 지연 속성(`DEFERRABLE INITIALLY DEFERRED`) 제거, `payments_primary_amount_ck`, `payments_method_type_other_ck`, `order_items_no_delete`, `orders_quota_fk`, `payments_order_total_fk`(복합 → 단일 FK), `identity_sessions` 복합 FK(→ 단일 FK), migration 트랜잭션 래퍼 — **11개 모두** 해당 영역 테스트가 실패했다. A-038의 `payments_no_delete` 트리거와 `payments_succeeded_amount_ck`도 같은 방식으로 제거해 각각 12개·8개 테스트가 실패함을 확인했다. 새 제약을 추가·변경할 때는 같은 방식으로 제거 시험을 한다.
 
 ### 2.2 후속 Step으로 이월한 DB 점검 (Step 2 기술 검토 S2·S5·S7·S8·S9·S10)
 
@@ -409,3 +411,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2 | 2026-11-15 | QTA-20~28(쿼터 행 미존재 동시 요청·롤백, REVIEW_REQUIRED 차단, `RELEASE_SEATS`→UNFULFILLED 원자성, PAID 초과 승인, UNKNOWN 차단, 격리 수준, seat_limit snapshot), IDV-18~22(고정 30분, 재사용, 잔여 10분, 주문 생성 제한, 다른 브라우저), PAY-26~31(결제수단 활성화·허용 목록, confirm 멱등 재시도, 60초/3분, EXPIRED, 제외 수단), WH-10~13, §16 PRV(운영 Mock 차단), §17 SBX(토스 sandbox 계약 테스트·미확인 항목 확인), §18 NIC(NICE adapter) 추가. Go/No-Go에 D-012 조건부 개시·D-013 NICE 지연 시 No-Go 반영. 보안 체크리스트 보강. 이전 원문: `docs/archive/v1.1/TEST_PLAN.md` |
 | 1.2.1 | 2026-11-16 | Step 2 구현 상태 반영: MIG-01~08 구현, MIG-03b·DRIFT-01·SEED-01~04 추가, 테스트 파일 대응·실행 방법. 시나리오 정의는 변경 없음 |
 | 1.2.2 | 2026-11-16 | Step 2 보완 반영: MIG-09~16 신설(migration 트랜잭션·실패 복구, 결제·주문 정합성, 쿼터 FK, 인증 세션 FK, `OTHER`, DELETE 차단, 타임스탬프), INV-9~12, §2.1 공허성 검증, §2.2 후속 Step 이월 항목. 기존 시나리오 정의는 변경 없음 |
+| 1.2.3 | 2026-11-17 | MIG-17·MIG-18 신설(A-038 결제 원장 DELETE 차단, `SUCCEEDED` 승인 금액). 기존 시나리오 정의는 변경 없음 |

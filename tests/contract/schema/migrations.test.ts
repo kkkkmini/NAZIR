@@ -180,6 +180,8 @@ describe("negative controls: the checkers fail on a sabotaged database", () => {
       `ALTER TABLE orders ALTER COLUMN hold_expires_at TYPE timestamp`, // MIG-07
       `ALTER TABLE payments ALTER COLUMN requested_amount TYPE integer`,
       `DROP TRIGGER order_items_no_update ON order_items`,
+      `DROP TRIGGER payments_no_delete ON payments`, // A-038
+      `ALTER TABLE payments DROP CONSTRAINT payments_succeeded_amount_ck`,
     ];
     for (const s of sabotage) await db.query(s);
   });
@@ -199,6 +201,7 @@ describe("negative controls: the checkers fail on a sabotaged database", () => {
   it("MIG-03 detects missing CHECKs and vocabulary drift against the application constants", async () => {
     const v = (await checkChecks(db)).join("\n");
     expect(v).toContain("missing CHECK payments.payments_refunded_amount_ck");
+    expect(v).toContain("missing CHECK payments.payments_succeeded_amount_ck");
     expect(v).toMatch(/orders_status_ck: database vocabulary \[PENDING, PAID\] != application constants/);
   });
 
@@ -215,7 +218,7 @@ describe("negative controls: the checkers fail on a sabotaged database", () => {
   });
 
   it("rule 14 detects a dropped immutability trigger", async () => {
-    expect(await checkImmutableTrigger(db)).toEqual(["missing trigger order_items_no_update"]);
+    expect(await checkImmutableTrigger(db)).toEqual(["missing trigger order_items_no_update", "missing trigger payments_no_delete"]);
   });
 });
 

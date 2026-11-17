@@ -402,7 +402,7 @@ describe("rule 10 — cumulative refunds never exceed the approved amount", () =
       const order = await mkOrder(c, w.ref(w.u1, w.is1));
       await expectInsertError(c, () => mkPayment(c, order.id, { requested_amount: 0 }), { code: PG.checkViolation, constraint: "payments_requested_amount_ck" });
       await expectInsertError(c, () => mkPayment(c, order.id, { method_type: "VIRTUAL_ACCOUNT" }), { code: PG.checkViolation, constraint: "payments_method_type_ck" });
-      await expectInsertError(c, () => mkPayment(c, order.id, { status: "SUCCEEDED" }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "SUCCEEDED", approved_amount: 100000 }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
       // approved_amount is set so that payments_primary_amount_ck is satisfied and only the role/status rule is violated
       await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", role: "PRIMARY", approved_amount: 100000 }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
       const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });

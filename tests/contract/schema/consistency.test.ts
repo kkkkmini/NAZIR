@@ -571,3 +571,119 @@ describe("Q-024 — an identity session carries its verification's subject and p
       });
     }));
 });
+
+// ───────────────────────────────────────── A-038 ─────────────────────────────────────────
+
+describe("A-038 — payments is a ledger: rows are never deleted", () => {
+  const ledger = { code: PG.restrictViolation, message: /payments rows are a ledger and are never deleted: DELETE rejected/ };
+  const count = async (c: Parameters<typeof insert>[0], id: string) =>
+    ((await c.query(`SELECT count(*)::int n FROM payments WHERE id = $1`, [id])).rows[0] as { n: number }).n;
+
+  it.each([
+    ["READY", { status: "READY" }],
+    ["CONFIRMING", { status: "CONFIRMING" }],
+    ["UNKNOWN", { status: "UNKNOWN" }],
+    ["FAILED", { status: "FAILED" }],
+    ["CANCELED", { status: "CANCELED" }],
+    ["SUCCEEDED + EXCESS (approved, never used to confirm)", { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 }],
+  ])("a %s payment that nothing references cannot be deleted", (_label, payment) =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id, payment); // no status log, no webhook, no refund, no review case
+      await expectDbError(c, `DELETE FROM payments WHERE id = $1`, [p.id], ledger);
+      expect(await count(c, p.id)).toBe(1);
+    }),
+  );
+
+  it("bulk deletes are rejected too, and so is the confirmed PRIMARY payment and a payment that has status logs", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const primary = await confirmOrder(c, order);
+      const excess = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
+      await insert(c, "payment_status_logs", { payment_id: excess.id, to_status: "SUCCEEDED", source: "API" });
+      await expectDbError(c, `DELETE FROM payments WHERE order_id = $1`, [order.id], ledger);
+      await expectDbError(c, `DELETE FROM payments`, [], ledger);
+      await expectDbError(c, `DELETE FROM payments WHERE id = $1`, [primary.id], ledger); // the trigger fires before the FKs
+      await expectDbError(c, `DELETE FROM payments WHERE id = $1`, [excess.id], ledger); // previously only an incidental FK of the log row
+      expect(await count(c, primary.id)).toBe(1);
+      expect(await count(c, excess.id)).toBe(1);
+    }));
+
+  it("a real (committed) DELETE attempt fails and the row survives", async () => {
+    const w = await mkWorld(db);
+    const order = await orderFor(db, w);
+    const p = await mkPayment(db, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
+    await expect(db.query(`DELETE FROM payments WHERE id = $1`, [p.id])).rejects.toMatchObject({ code: PG.restrictViolation });
+    expect((await db.query(`SELECT count(*)::int n FROM payments WHERE id = $1`, [p.id])).rows[0].n).toBe(1);
+  });
+
+  it("nothing legitimate needs DELETE: every lifecycle transition, insert and update still works; a rolled-back attempt leaves no row", async () => {
+    await db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const a = await mkPayment(c, order.id); // READY -> CONFIRMING -> UNKNOWN -> SUCCEEDED (EXCESS)
+      await update(c, "payments", a.id, { status: "CONFIRMING", confirm_started_at: new Date() });
+      await update(c, "payments", a.id, { status: "UNKNOWN", unknown_since: new Date() });
+      await update(c, "payments", a.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000, approved_at: new Date() });
+      const b = await mkPayment(c, order.id); // READY -> CANCELED (a discarded attempt is CANCELED, not deleted)
+      await update(c, "payments", b.id, { status: "CANCELED", canceled_at: new Date() });
+      const f = await mkPayment(c, order.id, { status: "FAILED" }); // FAILED -> SUCCEEDED (late approval found by a re-query)
+      await update(c, "payments", f.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
+      await confirmOrder(c, await orderFor(c, w, "u2")); // normal confirmation
+    });
+    const w = await mkWorld(db);
+    const order = await orderFor(db, w);
+    const c = await db.pool.connect();
+    let ref = "";
+    try {
+      await c.query("BEGIN");
+      const p = await mkPayment(c, order.id);
+      ref = p.merchant_payment_ref;
+      await c.query("ROLLBACK"); // an aborted creation transaction: the INSERT never happened, no DELETE involved
+    } finally {
+      c.release();
+    }
+    expect((await db.query(`SELECT count(*)::int n FROM payments WHERE merchant_payment_ref = $1`, [ref])).rows[0].n).toBe(0);
+  });
+});
+
+describe("A-038 — a SUCCEEDED payment carries a positive approved_amount", () => {
+  const bad = { code: PG.checkViolation, constraint: DB_CONSTRAINT.paymentSucceededAmountCheck };
+
+  it("INSERT: approved_amount NULL or 0 is rejected for SUCCEEDED; any other status may have none", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS" }), bad); // NULL (NULL-safe)
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 0 }), bad);
+      await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 1 });
+      for (const status of ["READY", "CONFIRMING", "UNKNOWN", "FAILED", "CANCELED"]) {
+        await c.query("SAVEPOINT s"); // in-flight statuses share one slot per order, so try each on its own
+        const p = await mkPayment(c, order.id, { status });
+        expect(p.approved_amount, `${status} payments have no approved amount yet`).toBeNull();
+        await c.query("ROLLBACK TO SAVEPOINT s");
+      }
+    }));
+
+  it("UPDATE: no way to reach SUCCEEDED without the amount, or to erase it afterwards", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id);
+      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS' WHERE id = $1`, [p.id], bad);
+      await expectDbError(c, `UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 0 WHERE id = $1`, [p.id], bad);
+      await c.query(`UPDATE payments SET status = 'SUCCEEDED', role = 'EXCESS', approved_amount = 100000 WHERE id = $1`, [p.id]); // one statement
+      await expectDbError(c, `UPDATE payments SET approved_amount = NULL WHERE id = $1`, [p.id], bad);
+      await expectDbError(c, `UPDATE payments SET approved_amount = 0 WHERE id = $1`, [p.id], bad);
+    }));
+
+  it("an approved payment can always be refunded in the ledger (the refund cap has a real approved amount to work with)", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
+      await c.query(`UPDATE payments SET refunded_amount = 100000 WHERE id = $1`, [p.id]);
+    }));
+});

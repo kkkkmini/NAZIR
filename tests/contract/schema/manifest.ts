@@ -203,6 +203,7 @@ export const CHECKS: CheckSpec[] = [
   vocab("payments", "role", PAYMENT_ROLE),
   { name: "payments_method_type_ck", table: "payments", columns: ["method_type"], vocab: PAYMENT_METHOD_TYPE, rule: "D-005, Q-022: CARD / EASY_PAY / OTHER" },
   { name: "payments_method_type_other_ck", table: "payments", columns: ["method_type", "status", "role"], rule: "Q-022: OTHER only for SUCCEEDED + EXCESS" },
+  { name: "payments_succeeded_amount_ck", table: "payments", columns: ["status", "approved_amount"], rule: "A-038: SUCCEEDED carries a positive approved amount" },
   { name: "payments_primary_amount_ck", table: "payments", columns: ["role", "approved_amount", "requested_amount"], rule: "S3: PRIMARY approved = requested" },
   vocab("payment_webhook_events", "status", WEBHOOK_EVENT_STATUS),
   vocab("payment_status_logs", "source", PAYMENT_LOG_SOURCE),
@@ -305,6 +306,7 @@ export const NON_UUID_ID_COLUMNS = new Set([
 export const IMMUTABLE_TRIGGERS = [
   { name: "order_items_no_update", table: "order_items", tgtype: 1 | 2 | 16, function: "order_items_reject_change" },
   { name: "order_items_no_delete", table: "order_items", tgtype: 1 | 2 | 8, function: "order_items_reject_change" },
+  { name: "payments_no_delete", table: "payments", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
 ];
 
 /**

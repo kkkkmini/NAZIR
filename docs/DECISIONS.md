@@ -91,6 +91,7 @@
 | A-035 | **인증 세션은 원 인증의 주체·용도를 그대로 가진다(Q-024 확정).** `identity_verifications UNIQUE (id, identity_subject_id, purpose)` + `identity_sessions` 복합 FK. 인증 1건 → 세션 1개 규칙은 유지. A-008·A-009의 DB 방어 강화. **사용자 승인 2026-11-16.** | Q-024 |
 | A-036 | **`order_items`는 UPDATE와 DELETE 모두 DB에서 차단한다(Q-023 확정).** A-006의 구현. 개인정보 파기·보관기간 만료는 이 원장을 임의 삭제하는 방식이 아니라 별도 정책·권한으로 다룬다(Q-016). **사용자 승인 2026-11-16.** | Q-023 |
 | A-037 | **모든 DB migration은 트랜잭션(`BEGIN; … COMMIT;`)으로 실행한다(S1).** Prisma Migrate가 migration을 트랜잭션으로 실행하지 않음을 실측으로 확인(중간 실패 시 앞 문장이 남고 이후 배포가 `P3009`로 막힘). 트랜잭션 불가 문장은 별도 migration + `-- no-transaction:` 표지. A-019의 구현 강화. **사용자 승인 2026-11-16.** | Step 2 기술 검토 S1 |
+| A-038 | **결제 원장 보존(결제 행 DELETE 불가)과 `SUCCEEDED`의 양수 `approved_amount` 필수.** 결제 시도·승인 이력 전체(`FAILED`·`CANCELED`·`EXCESS` 포함)는 원장이며 폐기는 상태 전이로 한다(§1.1 원칙 3, §7.1 "EXCESS 기록을 삭제하지 않는다"). 승인 금액이 없는 `SUCCEEDED`는 환불 상한 CHECK 때문에 환불을 원장에 기록할 수 없게 만든다. **사용자 지시(2026-11-17, "필요하다면 추가")로 구현했으며 PR 검토에서 최종 확인한다.** | Step 2 PR 전 검토 |
 
 ### 2.1 Step 2 구현 결정 D1~D8 [채택 — 사용자 승인 2026-11-16]
 
@@ -283,6 +284,52 @@
 - **권장:** (b)는 마이그레이션 1개로 해결되나 설계 문서에 없는 DB 객체 추가이므로 승인 후 도입.
 - **결정 담당:** 사용자. **상태:** **확정(2026-11-16, D3).** (a) 현행 유지 — `created_at`은 DB 기본값, `updated_at`은 Prisma `@updatedAt`, raw SQL UPDATE는 `updated_at`을 명시 갱신, 일괄 트리거 없음. 이전 보고의 "`created_at`도 앱 시각" 설명은 실측으로 **Prisma Client 쓰기에 한해 사실**임을 확인했다(`DATABASE.md` §19.5, 테스트 DB-02). raw SQL이 생략하면 DB 시각(트랜잭션 시작 시각)이다.
 
+### Q-027. 결제수단의 요청값과 PG 보고 원문의 보존 (Step 2 PR 전 검토)
+- **문제:** 현재 `payments.method_type`은 상태에 따라 다른 사실을 담는다. `READY`~`UNKNOWN`에서는 **사용자가 요청한 수단**, 승인 후에는 **PG가 보고한 수단**(허용 외면 `OTHER`)이다(A-034). 승인 때 덮어쓰므로 **요청값이 사라진다**(실측: `CARD` 요청 → `OTHER` 승인 후 행에 `CARD` 흔적 없음). PG가 보낸 **원본 수단 문자열**(토스 한글 `method`, 간편결제 코드)은 어디에도 저장되지 않는다(`confirm` 응답은 매핑된 필드만 남는다). 요청 수단은 허용 외 승인으로 `review_cases`가 열릴 때만 `detail`에 남고, **허용된 수단끼리의 불일치**(예: 카드로 요청했는데 통합결제창에서 간편결제를 선택)는 어디에도 남지 않는다. `easy_pay_provider`도 요청값과 보고값이 같은 컬럼이다.
+- **왜 필요한가:** ① 환불 절차가 수단별로 다르다(D-007: PG 관리자 페이지 수동 환불). `OTHER`만으로는 가상계좌·휴대폰·계좌이체를 구분할 수 없다. ② Q-021(통합결제창의 간편결제 노출 제어 미확인)이 실제로 얼마나 일어나는지 측정하려면 요청과 보고를 비교해야 한다. ③ 분쟁 시 "무엇을 요청했고 무엇이 승인됐는가"의 증빙. ④ A-030은 결제 **시작 시점** 허용 목록을 기준으로 판정하므로 감사 재현에 요청 수단이 필요하다(허용 목록 스냅샷 자체는 저장하지 않는다).
+- **A-030·A-034와의 일치:** 의미는 일치한다(변경 없음). 다만 A-034/Q-022가 "요청 수단은 `review_cases.detail`에 남긴다"고 한 보완책은 **review case가 생기는 경우에만** 성립한다.
+- **선택지:**
+  - (0) 현행 유지 — review case와 웹훅 `payload_redacted`에 의존. 컬럼 추가 없음. 허용된 수단 간 불일치·승인 원문은 보존되지 않음.
+  - (1) **최소 2컬럼** — `requested_method_type`(`NOT NULL`, `CARD`|`EASY_PAY`, 생성 후 불변) + `provider_method_raw`(`varchar(100)` NULL, PG가 보고한 수단 원문 라벨 그대로, **판정에는 쓰지 않음**). CHECK: `method_type = 'OTHER'`이면 `provider_method_raw` 필수. `method_type`·`easy_pay_provider`·`card_company`는 현행 의미(정규화된 유효값)를 유지한다.
+  - (2) (1) + `requested_easy_pay_provider` — DIRECT 흐름에서는 요청한 간편결제사가 바뀔 수 없으므로 근거가 약하다.
+  - (3) (1) + 승인 응답 redacted JSON 스냅샷 — 개인정보·크기 위험, 비권장.
+- **추천: (1).** 이유: 요청값 소실은 되돌릴 수 없는 정보 손실이고, `OTHER`의 원문은 환불 절차 선택에 직접 필요하다. 지금은 데이터가 없어 `NOT NULL` 컬럼을 backfill 없이 추가할 수 있다(병합 후에는 과거 요청값을 복원할 수 없다). 비용은 컬럼 2개 + CHECK 1~2개(+ 불변 트리거는 선택).
+- **영향:** `payments` 컬럼·CHECK, 상수(`PAYMENT_REQUEST_METHOD_TYPE`), Step 6 adapter 매핑(`DISALLOWED` → `OTHER` + 원문), `confirmOrder` 등 테스트 픽스처, TEST PAY-17·PAY-27.
+- **결정 담당:** 사용자. **기한:** Step 2 병합 전 권장(Step 6 전 필수). **상태:** **미결정 — 구현하지 않음.**
+
+### Q-028. 인증 세션 생성 시 원 인증의 상태·브라우저 바인딩 검증 (Step 2 PR 전 검토)
+- **문제:** A-035(Q-024)는 세션의 **주체·용도**를 원 인증과 맞춘다. 그러나 DB는 세션을 만들 때 원 인증의 **`status`**와 **`browser_binding_hash`**를 보지 않는다. 실측(2026-11-17, 현재 DB): 주체가 설정된 `PENDING`/`FAILED`/`EXPIRED`/`VERIFIED`/`CONSUMED` 인증 **모두** 세션 생성 가능, 세션을 만든 뒤 인증이 `VERIFIED`로 남음, 세션이 있는 인증을 `PENDING`/`FAILED`로 되돌리기, 세션 없는 `CONSUMED`, **다른 브라우저의 바인딩 해시를 가진 세션**, 이미 지난 `claim_expires_at` 모두 허용된다.
+- **기존 생명주기와의 대조**(DATABASE §6.2, API_SPEC claim: "상태 `VERIFIED`, `claim_expires_at` 이전", 세션 발급과 `CONSUMED`는 한 트랜잭션):
+
+| 인증 상태 | 주체 설정 | 세션 | 근거 |
+|---|---|---|---|
+| `PENDING` | 없음("검증 후 설정") — 설정되어 있어도 행 자체는 해롭지 않음 | **불가** | 아직 검증 전 |
+| `VERIFIED` | 있음(CHECK) | claim 중에만. **같은 트랜잭션이 끝나면 `CONSUMED`여야 함** | claim 대상 |
+| `CONSUMED` | 있음(CHECK) | **반드시 있음(1회성)** | 세션 발급 완료 |
+| `FAILED` | 보통 없음. 있어도 모호 | **불가** | 검증 실패 |
+| `EXPIRED` | `VERIFIED` 후 claim 기한 경과면 있음 | **불가** | 교환 기한 경과 |
+
+- **제안(프로토타입으로 검증, 저장소에는 추가하지 않음):** ① 세션 복합 FK를 4컬럼으로 확장(`identity_verifications UNIQUE (id, identity_subject_id, purpose, browser_binding_hash)`) — 다른 브라우저의 claim을 DB가 거부. ② **지연(DEFERRABLE INITIALLY DEFERRED) constraint trigger 2개**: 세션이 있으면 원 인증은 최종 상태가 `CONSUMED`, `CONSUMED`이면 세션이 존재(양방향). 프로토타입 결과: 정상 8가지(`PENDING`→`VERIFIED`→세션→`CONSUMED`, `CONSUMED` 먼저·세션 나중, 이미 `VERIFIED`로 생성된 인증의 claim, `PENDING`→`FAILED`, `VERIFIED`→`EXPIRED`, 주체가 있는 `PENDING`/`FAILED` 행 단독, 세션의 `REVOKED`/`EXPIRED`)는 **모두 허용**, 나쁜 7가지(`PENDING`/`FAILED`/`EXPIRED`/`VERIFIED`로 남은 인증의 세션, 세션 있는 인증을 `FAILED`로, 세션 없는 `CONSUMED`, 다른 바인딩)는 **모두 거부**.
+- **의도적으로 제안하지 않는 것:** `PENDING`/`FAILED`에 주체를 금지하는 CHECK(기존 절차에서 `FAILED`+주체 가능성이 문서에 불명확하고 이득이 작아 정상 절차를 막을 위험이 더 큼), `claim_expires_at` 시간 검사(NULL의 의미 미정, 서비스 책임 + 테스트가 적절).
+- **선택지:** (0) 현행(서비스 검증) (1) 4컬럼 FK만 (2) **FK + 지연 trigger 2개(추천)**.
+- **추천: (2).** 이유: 구매 한도·활성 주문의 기준 `identity_subject_id`와 브라우저 바인딩은 보안의 핵심이고(CLAUDE_HANDOFF §8 "다른 브라우저에서 인증 세션 재사용 금지"), 서비스 버그 하나로 `PENDING` 인증이 세션이 되는 경로를 DB가 닫는다. 정상 절차는 막지 않음을 프로토타입으로 확인했다.
+- **영향:** 인증 FK·unique·trigger 추가(컬럼 추가 없음), Step 4 claim 트랜잭션(커밋 시점 오류 처리), MIG-13 확장.
+- **결정 담당:** 사용자. **기한:** Step 2 병합 전 권장(Step 4 전 필수). **상태:** **미결정 — 구현하지 않음.**
+
+### Q-029. 원장성 테이블의 보호 범위 (A-038 이후)
+- **문제:** A-038은 `payments` DELETE만 막는다. 실측(2026-11-17)으로 다음은 **지금 삭제·수정할 수 있다**: `tickets`(DELETE·UPDATE), `refunds`(항목 없는 행 DELETE, UPDATE), `refund_items`·`seat_holds`(DELETE), `payment_status_logs`·`order_status_logs`(DELETE·UPDATE), `seat_status_logs`·`payment_webhook_events`(DELETE), **`admin_audit_logs`(DELETE·UPDATE — A-022 P0 감사 로그)**, 참조 없는 `orders`(DELETE). §1.1 원칙 3("금전·좌석·티켓·인증 이력은 보존")과 FK RESTRICT만으로는 보장되지 않는다.
+- **분류 제안**(`ledger_reject_delete()`를 재사용할 수 있다):
+
+| 구분 | 테이블 | 제안 |
+|---|---|---|
+| append-only(UPDATE·DELETE 차단) | `payment_status_logs`, `order_status_logs`, `seat_status_logs`, `admin_audit_logs` | 이력 변조 불가 |
+| 원장(DELETE 차단) | `refunds`, `refund_items`, `tickets`, `orders`, `seat_holds` | 종료는 상태 전이로 |
+| 보관기간으로 지워야 하는 것(차단하지 않음) | `idempotency_records`, `order_access_sessions`/`identity_sessions`/`admin_sessions`(만료 정리), `outbox_events`(SENT 정리), `payment_webhook_events`·`identity_verifications`(개인정보·보관기간 Q-016) | 삭제 주체·기간은 별도 정책 |
+
+- **선택지:** (0) `payments`만(현행) (1) 위 분류 중 append-only + 원장 전부 (2) 감사 로그(`admin_audit_logs`)와 금전 원장(`refunds`, `refund_items`)만 우선.
+- **추천: (2)를 이번에, 나머지는 해당 Step에서.** 이유: 감사 로그와 환불은 금전·운영 책임의 증거이고 이후 Step의 서비스 로직과 충돌하지 않는다. 상태 로그·티켓·hold는 Step 5·8에서 실제 쓰기 패턴(예: 환불 후 티켓 `VOID`, hold 상태 전이)을 확인한 뒤 확정하는 편이 안전하다. 어느 쪽이든 TRUNCATE와 소유자 권한은 Step 10 DB 역할 분리(S9)로 통제한다.
+- **결정 담당:** 사용자. **기한:** Step 2 병합 전 권장. **상태:** **미결정 — 구현하지 않음.**
+
 ---
 
 ## 4. 외부 확인 필요 [외부 확인]
@@ -326,3 +373,4 @@
 | 1.2 | 2026-11-15 | 확정 D-009~D-015(토스·NICE, 결제창 API 개별 연동, 1차 결제수단, 판매 개시 조건, NICE 지연 시 연기·Mock 판매 금지, 활성 주문 범위·UNFULFILLED, 인증 세션 규칙). 채택안 A-024~A-031(Provider 단계·fail-closed, 단계 DB 미저장, Mock 빌드 제거 비필수, 웹훅 처리, 거래별 문맥·Secret 분리, 쿼터 격리·잠금 후 판단, 결제수단 허용 목록, confirm timeout과 3분 보호). Q-001~Q-005·Q-013 갱신, Q-017~Q-021 신설, E-001·E-002·E-007·E-008 원문 확인 결과 반영. 이전 원문: `docs/archive/v1.1/DECISIONS.md` |
 | 1.2.1 | 2026-11-16 | Step 2 구현 중 발견한 문서 충돌·공백 Q-022~Q-026 추가(확정·채택 항목은 변경 없음). 상세는 `DATABASE.md` §19.6~§19.7 |
 | 1.2.2 | 2026-11-16 | Step 2 보완 결정 반영: A-032~A-037 신설(결제·주문 정합성, 주문↔쿼터 FK, `OTHER` 결제수단, 인증 세션 복합 FK, `order_items` DELETE 차단, migration 트랜잭션), D1~D8 확정(§2.1), Q-022~Q-024·Q-026 확정, Q-025 방향 승인. A-001~A-031, D-001~D-015는 변경 없음 |
+| 1.2.3 | 2026-11-17 | Step 2 PR 전 마지막 검토: A-038(결제 원장 DELETE 불가, `SUCCEEDED` 승인 금액 필수) 추가, Q-027(결제수단 요청값·PG 원문 보존)·Q-028(인증 세션의 원 인증 상태·바인딩 검증)·Q-029(원장성 테이블 보호 범위) 신설 — 선택지·추천안만 기록하고 구현하지 않음. A-001~A-037, D-001~D-015는 변경 없음 |

@@ -109,6 +109,8 @@ export const DB_CONSTRAINT = {
   paymentOrderTotalFk: "payments_order_total_fk",
   paymentPrimaryAmountCheck: "payments_primary_amount_ck",
   paymentMethodOtherCheck: "payments_method_type_other_ck",
+  /** CHECK: a SUCCEEDED payment carries a positive approved_amount (A-038). */
+  paymentSucceededAmountCheck: "payments_succeeded_amount_ck",
   /** FK: identity session = its verification's subject and purpose (Q-024). */
   identitySessionVerificationFk: "identity_sessions_verification_subject_purpose_fk",
   /** Deferred constraint-trigger errors (raised at COMMIT with SQLSTATE 23514). */
