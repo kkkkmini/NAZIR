@@ -81,7 +81,7 @@ Step 2에서 DB가 보장하는 범위와 **보장하지 않아 이후 Step이 �
 | Q-029 (A-041) | **한정 범위 구현 완료**: `admin_audit_logs`·`payment_status_logs`·`refund_items`(UPDATE+DELETE 차단), `refunds`(DELETE 차단). **남은 결정**: `tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`는 보호하지 않았다 — 해당 서비스를 구현하는 Step(5·6·8)에서 실제 쓰기 패턴을 보고 `ledger_reject_*()` 재사용 여부를 결정한다. 개인정보가 섞인 감사 로그의 파기·정정 절차는 Q-016과 함께 결정 | **Step 5·6·8** | MIG-21, 해당 Step 테스트 |
 | A-042 승인 증거 | **구현 완료.** `SUCCEEDED` 이후 `approved_amount`·`approved_at`·수단 필드·PG 거래 식별값·`status` 등은 DB가 불변으로 지킨다. **Step 6 구현 지침**: 승인 UPDATE(Tx2)가 `status`·`role`·`approved_amount`·`approved_at`·`method_type`·`provider_method_raw`·`card_company`·`easy_pay_provider`·`pg_transaction_id`·`provider_payment_id`를 **한 문장으로 모두** 쓴다(나중에 채울 수 없다). 재조회·웹훅이 이미 `SUCCEEDED`인 결제를 다시 확인할 때는 `last_verified_at`·`requery_count`만 갱신한다. **Step 8 과제**: 잘못 기록된 승인 값의 정정 절차(감사 로그 + 관리자 전용 권한)를 설계한다 — 일반 UPDATE로는 고칠 수 없다 | **Step 6·8** | PAY-*, MIG-22 |
 | A-042 환불 핵심·합계 | **구현 완료.** `refunds`의 `order_id`·`payment_id`·`refund_type`·`provider`·`total_amount` 등은 생성 후 불변, 상태·운영 메타데이터 UPDATE는 허용. **Step 8 구현 지침**: 환불 생성 트랜잭션은 `refunds` → `refund_items` 순서로 쓰고 `SEAT`의 항목 합계 = `total_amount`(항목 1건 이상), `PAYMENT_EXCESS`는 항목 없음. 위반은 **COMMIT에서** `23514`(`refunds_seat_items_total_ck`/`refunds_excess_no_items_ck`)로 나오므로 도메인 오류로 변환한다. 금액이나 대상 결제를 바꿔야 하면 환불을 `WITHDRAWN`/`FAILED`로 닫고 새로 만든다 | **Step 8** | REF-*, MIG-23 |
-| A-042 CLI 환경 가드 | **구현 완료.** `prisma.config.ts`가 `DATABASE_URL`과 `NAZIR_RUNTIME_ENV`를 대조한다. 로컬 개발·CI·운영 배포 스크립트는 **`NAZIR_RUNTIME_ENV`를 명시**해야 한다(누락은 production으로 간주되어 `_test` DB가 거부된다). Step 10 배포 파이프라인에서 `migrate deploy` 실행 환경의 `NAZIR_RUNTIME_ENV`와 DB 이름 규칙을 확인한다 | **Step 10** | MIG-24 |
+| A-042 CLI 환경 가드 | **구현 완료.** `prisma.config.ts`가 `DATABASE_URL`과 `SHADOW_DATABASE_URL`을 `NAZIR_RUNTIME_ENV`와 대조하고 두 URL이 같은 DB이면 거부한다(Shadow DB는 CLI가 초기화하므로 `migrate dev`·`migrate diff`용 Shadow DB도 같은 환경 규칙을 따라야 한다). 로컬 개발·CI·운영 배포 스크립트는 **`NAZIR_RUNTIME_ENV`를 명시**해야 한다(누락은 production으로 간주되어 `_test` DB가 거부된다). Step 10 배포 파이프라인에서 `migrate deploy` 실행 환경의 `NAZIR_RUNTIME_ENV`와 DB 이름 규칙을 확인한다 | **Step 10** | MIG-24 |
 
 ## 5. 외부 업체 지연과 일정 [권장 — 사용자 확정 아님, 판매 개시 조건만 확정 D-012·D-013]
 
@@ -185,3 +185,4 @@ Step 2에서 DB가 보장하는 범위와 **보장하지 않아 이후 Step이 �
 | 1.2.3 | 2026-11-17 | §4.1에 Q-027~Q-029 결정 대기 항목 추가. 단계·일정은 변경 없음 |
 | 1.2.4 | 2026-11-17 | §4.1: Q-027~Q-029를 구현 완료로 갱신하고 Step 4(claim 커밋 시점 오류·순서 무관·보존 정책 결정)·Step 6(요청 수단·PG 원문 기록)·Step 5·6·8(남은 원장성 테이블 결정) 지침을 추가. 단계·일정은 변경 없음 |
 | 1.2.5 | 2026-11-18 | §4.1: A-042(승인 증거 불변, 환불 핵심·합계, Prisma CLI 환경 가드)에 대한 Step 6·8·10 지침과 Step 8 과제(승인 값 정정 절차) 추가. 단계·일정은 변경 없음 |
+| 1.2.6 | 2026-11-18 | §4.1 A-042 CLI 환경 가드 행에 Shadow DB 규칙 반영. 단계·일정은 변경 없음 |

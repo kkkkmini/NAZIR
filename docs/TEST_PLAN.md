@@ -62,7 +62,7 @@
 | MIG-21 | 원장성 테이블 보호(Q-029, A-041): `admin_audit_logs`·`payment_status_logs`·`refund_items`의 UPDATE·DELETE(개별·벌크·**실제 COMMIT**) 거부, `refunds` DELETE 거부·UPDATE(상태 전이) 허용, **범위 밖**(`tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`)은 차단되지 않음을 명시적으로 확인 | 차단 대상은 SQLSTATE `23001`, 범위 밖 테이블은 기존 동작 유지 |
 | MIG-22 | 승인 증거 불변(PR #2 P1, A-042): `SUCCEEDED` 결제(`PRIMARY`·`EXCESS`)의 `approved_amount`·`approved_at`·`method_type`·`provider_method_raw`(값→다른 값·값→NULL)·`easy_pay_provider`·`card_company`·`merchant_payment_ref`·`provider_payment_id`·`pg_transaction_id`·`provider`·`currency`·`order_id`·`status`(`FAILED`/`CANCELED`/`READY`/`CONFIRMING`/`UNKNOWN` 강등, 승인 값 지우기 동반 포함) UPDATE 거부(단건·벌크·실제 COMMIT), 거부 후 행 불변. 허용: `refunded_amount`(전액 환불까지)·`last_verified_at`·`requery_count`·`next_requery_at`·`unknown_since`·`confirm_started_at`·`failure_*`·`updated_at`·값이 같은 쓰기, `READY`/`CONFIRMING`/`UNKNOWN` → `SUCCEEDED` 전이(모든 증거를 한 UPDATE로 기록), `SUCCEEDED` 이전 결제의 모든 컬럼 UPDATE, `PRIMARY` ⇔ 주문 일관성(`checkAtCommit`) | 증거는 SQLSTATE `23001`(`payments_approved_evidence_immutable`)로 거부, 운영 컬럼 UPDATE는 허용 |
 | MIG-23 | 환불 핵심 불변과 `SEAT` 합계(PR #2 P1, A-042): `total_amount`·`refund_type`·`provider`·`payment_id`·`order_id`(+`payment_id`)·`requested_by_admin_id`(NULL→값·값→값·값→NULL)·`created_at`·`id` UPDATE 거부(단건·벌크·실제 COMMIT), `order_id` 단독 변경은 복합 FK가 먼저 판정. 허용: 상태 전이 전체(`REQUESTED`→`VERIFYING`→`FAILED`→`VERIFYING`→`COMPLETED`, `WITHDRAWN`)와 `provider_refund_id`·`pg_executed_by_admin_id`·`verified_at`·`completed_at`·`failure_reason`·`reason`·`updated_at`·값이 같은 쓰기, 완료 후에도 핵심 불변. `SEAT` 환불: 항목 합계 = 총액(항목 1개·여러 개·환불 후 항목 INSERT) 허용, 항목 없음·합계 부족·합계 초과·커밋된 환불에 항목 추가는 **COMMIT에서** 거부(`refunds_seat_items_total_ck`), `PAYMENT_EXCESS`는 항목 없을 때만 허용(`refunds_excess_no_items_ck`), 실제 COMMIT 실패 시 환불·항목이 남지 않음 | 핵심 변경은 `23001`(`refunds_core_immutable`), 합계 위반은 COMMIT에서 `23514` |
-| MIG-24 | Prisma CLI 환경 가드(PR #2 P2, A-042): 실제 `prisma validate`로 환경×DB 10가지(local+dev 허용, test+test 허용, test+dev 거부, local/staging/production+test 거부, 누락·미지 값은 production 취급, production+dev 허용), `DATABASE_URL` 없이 `validate` 동작, 거부된 `migrate deploy`·`migrate reset`이 **시작 전에** 종료되고 DB에 테이블이 생기지 않으며 기존 데이터가 남음, 허용 조합의 `migrate deploy` 정상, `SHADOW_DATABASE_URL`을 쓰는 `migrate diff` 정상. 단위 테스트(DB 불필요)가 같은 규칙과 비밀번호 비노출을 확인 | 거부는 명령 실행 전, DB 불변 |
+| MIG-24 | Prisma CLI 환경 가드(PR #2 P2, A-042): 실제 `prisma validate`로 환경×DB 10가지(local+dev 허용, test+test 허용, test+dev 거부, local/staging/production+test 거부, 누락·미지 값은 production 취급, production+dev 허용), `DATABASE_URL` 없이 `validate` 동작, 거부된 `migrate deploy`·`migrate reset`이 **시작 전에** 종료되고 DB에 테이블이 생기지 않으며 기존 데이터가 남음, 허용 조합의 `migrate deploy` 정상. **Shadow DB(2026-11-18 보강)**: local/staging/production/누락/미지 환경 + 개발 DB + `_test` Shadow DB 거부, test + `_test` DB + 비test Shadow DB 거부, 모든 명령(`migrate deploy` 포함)에서 거부, 주 DB와 같은 DB(동일 URL·loopback 다른 표기) 거부 후 데이터 보존, local + 비test Shadow·test + `_test` Shadow 허용(양성 대조: 허용된 명령은 Shadow 안의 sentinel 테이블을 실제로 지움 → 거부된 명령이 지우지 않았음이 의미 있음), Shadow 미설정 시 `validate`·`migrate status` 정상·`migrate diff --from-migrations`는 Prisma 자체 오류. 단위 테스트(DB 불필요)가 같은 규칙, 빈 문자열·공백·형식 오류 Shadow, Shadow만 설정, 비밀번호 비노출을 확인 | 거부는 명령 실행 전, DB·Shadow DB 불변 |
 
 **Step 2 구현 상태 (2026-11-16):** MIG-01~16 구현·통과. 실행: `TEST_DATABASE_URL=postgresql://… npm run test:db` (실제 PostgreSQL 15+ 필수, 미설정 시 건너뛰지 않고 실패). CI는 `.github/workflows/ci.yml`의 `db` job(`postgres:16` 서비스 컨테이너). 파일과 범위:
 
@@ -74,8 +74,8 @@
 | `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK, A-038 결제 원장(DELETE)·승인 금액 |
 | `tests/contract/schema/ledger-claims.test.ts` | **MIG-17~21 후속(74개)**: A-038 승인 시각, A-039 요청 수단·원문·미승인 결제의 수단 일치(+39), A-040 인증 세션 무결성(두 claim 순서, 보존·삭제 시나리오 포함), A-041 원장성 테이블 보호(벌크·실제 COMMIT 포함) |
 | `tests/contract/schema/ledger-evidence.test.ts` | **MIG-22·23 (63개)**: 승인 증거 불변(컬럼×역할 표 기반 테스트, 벌크, 강등, 허용 운영 UPDATE, 전이, 실제 COMMIT), 환불 핵심 불변(컬럼별·벌크·상태 전이·실제 COMMIT), `SEAT` 합계(COMMIT 시점, 실제 COMMIT 성공·실패) |
-| `tests/contract/schema/cli-guard.test.ts` | **MIG-24 (20개)**: 실제 Prisma CLI와 PostgreSQL로 `prisma.config.ts` 환경 가드 확인(`migrate deploy`·`migrate reset` 거부 시 DB 불변) |
-| `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(DB 불필요, `npm test`) |
+| `tests/contract/schema/cli-guard.test.ts` | **MIG-24 (32개)**: 실제 Prisma CLI와 PostgreSQL로 `prisma.config.ts` 환경 가드 확인(`DATABASE_URL` 조합 + Shadow DB 조합, 거부 시 DB·Shadow DB 불변) |
+| `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(38개, DB 불필요, `npm test`). `isSameDatabase`(loopback 표기·포트·서버 비교)도 여기서 검증 |
 | `tests/unit/payment-method.test.ts` | A-039 서비스 규칙의 순수 함수 시험(DB 불필요, `npm test`): 생성 시 요청값 기록, 승인 시 요청값 불변, `DISALLOWED`→`OTHER`+원문, 원문 안전 검사 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
 | `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
@@ -175,6 +175,26 @@
 동등 변이 3개의 이유: ① `requested_amount` 보호 제거 — 복합 FK `payments_order_total_fk`가 이미 어떤 변경도 거부한다(`requested_amount = orders.total_amount`이고 결제가 있으면 주문 총액도 RESTRICT). 테스트 "requested_amount is already fixed by the composite FK"가 FK로 거부됨을 확인한다. ② `refunds.order_id` 보호 제거 — `(payment_id, order_id)` 복합 FK 때문에 `order_id`는 결제가 바뀌어야만 바뀔 수 있고 `payment_id`가 불변이다. ③ `SEAT` 환불 "항목 없음" 분기 제거 — `total_amount > 0` CHECK 덕분에 항목 합계 0은 항상 총액과 달라 다음 분기가 같은 제약 이름으로 거부한다(분기는 오류 메시지를 명확하게 하려는 것). 세 곳 모두 중복 방어(defense in depth)로 남겼다.
 
 
+
+
+**Shadow DB 가드(2026-11-18 PR #2 추가 리뷰)** 변이 12개를 같은 방식으로 시험했다(단위 `prisma-cli-guard`·`database-config` / 실제 CLI `cli-guard`, 매번 원본 복원·복원 후 바이트 동일). **12개 모두 검출**(실패한 테스트 수):
+
+| # | 변경 | 단위 | CLI 계약 |
+|---|---|---|---|
+| SH1 | Shadow DB를 전혀 검사하지 않음 | 15개 | 12개 |
+| SH2 | `DATABASE_URL`이 있을 때만 Shadow 검사 | 1개 | 0개 |
+| SH3 | test 환경에서 Shadow 검사 생략 | 3개 | 3개 |
+| SH4 | test 외 환경에서 Shadow 검사 생략 | 13개 | 9개 |
+| SH5 | Shadow는 환경 규칙 없이 항상 허용 | 15개 | 12개 |
+| SH6 | 주 DB와 같은 DB 검사 제거 | 7개 | 4개 |
+| SH7 | 같은 DB 비교에서 DB 이름 무시 | 5개 | 2개 |
+| SH8 | 같은 DB 비교에서 loopback 표기 정규화 제거 | 1개 | 2개 |
+| SH9 | 같은 DB 비교에서 포트 무시 | 1개 | 0개 |
+| SH10 | 같은 DB 비교에서 호스트 무시(과도한 강화) | 1개 | 0개 |
+| SH11 | 빈 문자열 Shadow를 설정된 것으로 취급(과도한 강화) | 1개 | 0개 |
+| SH12 | 오류 메시지에 Shadow URL을 그대로 출력 | 2개 | 0개 |
+
+SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검출하고, 환경·DB 조합의 실제 효과(Shadow가 지워지는지)는 CLI 계약 테스트가 SH1·SH3~SH8로 확인한다.
 
 ### 2.2 후속 Step으로 이월한 DB 점검 (Step 2 기술 검토 S2·S5·S7·S8·S9·S10)
 
@@ -515,3 +535,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.4 | 2026-11-17 | MIG-17~18 보강, MIG-13 확장(바인딩), MIG-19(결제수단 요청값·원문, Q-027)·MIG-20(인증 세션 무결성, Q-028)·MIG-21(원장성 테이블 보호, Q-029) 신설, 테스트 파일 `ledger-claims.test.ts`·`payment-method.test.ts` 대응, 뮤테이션 시험 결과(§2.1.1) 추가. 기존 시나리오 정의는 변경 없음 |
 | 1.2.5 | 2026-11-18 | MIG-19 보강: 미승인 결제의 `method_type` = 요청값(CHECK `payments_unapproved_method_matches_request_ck`), `ledger-claims.test.ts` 35→74개, 뮤테이션 M1~M6 결과(§2.1.1). 기존 시나리오 정의는 변경 없음 |
 | 1.2.6 | 2026-11-18 | MIG-22(승인 증거 불변)·MIG-23(환불 핵심 불변·`SEAT` 합계)·MIG-24(Prisma CLI 환경 가드) 신설, 테스트 파일 `ledger-evidence.test.ts`·`cli-guard.test.ts`·`prisma-cli-guard.test.ts` 대응, 뮤테이션 시험(§2.1.2), SEED-03 대상 DB 조정·SEED-03b 추가, 기존 시나리오 정의 변경 1건(S3 `SUCCEEDED` 강등은 이제 문장 시점에 거부). |
+| 1.2.7 | 2026-11-18 | MIG-24 보강: `SHADOW_DATABASE_URL` 환경 규칙·주 DB와 같은 DB 거부·미설정 시 기존 동작·거부 시 Shadow DB 불변(sentinel), `cli-guard.test.ts` 20→32개·`prisma-cli-guard.test.ts` 16→38개, 뮤테이션 SH1~SH12(§2.1.2). 기존 단언 변경 1건: "Shadow는 검사하지 않고 그대로 전달"을 새 요구에 맞게 교체. |

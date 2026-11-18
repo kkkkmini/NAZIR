@@ -59,9 +59,9 @@ export function parseDatabaseUrl(raw: string | undefined, label = "DATABASE_URL"
   };
 }
 
-/** Throws when DATABASE_URL points at a database that does not belong to `runtimeEnv`. */
-export function assertDatabaseMatchesEnv(runtimeEnv: RuntimeEnv, raw: string | undefined): DatabaseInfo {
-  const info = parseDatabaseUrl(raw);
+/** Throws when the URL (DATABASE_URL, or `label`) points at a database that does not belong to `runtimeEnv`. */
+export function assertDatabaseMatchesEnv(runtimeEnv: RuntimeEnv, raw: string | undefined, label = "DATABASE_URL"): DatabaseInfo {
+  const info = parseDatabaseUrl(raw, label);
   if (runtimeEnv === "test" && !info.isTestDatabase) {
     throw new DatabaseConfigError(
       `NAZIR_RUNTIME_ENV=test requires a database whose name ends with "${TEST_DB_SUFFIX}" (got "${info.database}")`,
@@ -78,4 +78,18 @@ export function assertDatabaseMatchesEnv(runtimeEnv: RuntimeEnv, raw: string | u
 /** Non-secret summary safe to log. */
 export function describeDatabase(info: DatabaseInfo) {
   return { host: info.host, port: info.port, database: info.database, isTestDatabase: info.isTestDatabase };
+}
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const normalizeHost = (host: string) => {
+  const h = host.toLowerCase();
+  return LOOPBACK_HOSTS.has(h) ? "localhost" : h;
+};
+
+/**
+ * True when both URLs name the same database on the same server (loopback spellings count as one host; credentials are
+ * irrelevant). The Prisma shadow database is reset by the CLI, so it must never be the main database.
+ */
+export function isSameDatabase(a: DatabaseInfo, b: DatabaseInfo): boolean {
+  return normalizeHost(a.host) === normalizeHost(b.host) && a.port === b.port && a.database === b.database;
 }

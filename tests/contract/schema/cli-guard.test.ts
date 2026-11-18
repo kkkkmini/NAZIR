@@ -10,6 +10,8 @@ let testDb: TestDb; // a *_test database (migrated clone)
 let devDb: TestDb; // a database that is not a test database (migrated clone)
 let emptyTest: string; // *_test, no tables
 let emptyDev: string; // not a test database, no tables
+let shadowTest: string; // *_test, holds only a sentinel table: a shadow reset would drop it
+let shadowDev: string; // not a test database, holds only a sentinel table
 
 beforeAll(async () => {
   testDb = await cloneTestDb(server, inject("templateDb"), "test");
@@ -18,24 +20,41 @@ beforeAll(async () => {
   emptyDev = newThrowawayName("dev");
   await createDatabase(server, emptyTest);
   await createDatabase(server, emptyDev);
+  shadowTest = newThrowawayName("test");
+  shadowDev = newThrowawayName("dev");
+  await createDatabase(server, shadowTest);
+  await createDatabase(server, shadowDev);
+  for (const name of [shadowTest, shadowDev]) await withDb(name, (c) => c.query("CREATE TABLE guard_sentinel (id int); INSERT INTO guard_sentinel VALUES (42)"));
 });
 afterAll(async () => {
   await destroyTestDb(testDb);
   await destroyTestDb(devDb);
   await dropDatabase(server, emptyTest);
   await dropDatabase(server, emptyDev);
+  await dropDatabase(server, shadowTest);
+  await dropDatabase(server, shadowDev);
 });
 
-const tablesIn = async (name: string) => {
+const withDb = async <T>(name: string, fn: (c: import("pg").Client) => Promise<T>): Promise<T> => {
   const { Client } = await import("pg");
   const c = new Client({ connectionString: server.urlFor(name) });
   await c.connect();
   try {
-    return (await c.query(`SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public'`)).rows[0].n as number;
+    return await fn(c);
   } finally {
     await c.end();
   }
 };
+const tablesIn = (name: string) => withDb(name, async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public'`)).rows[0].n as number);
+/** The sentinel table is still the only thing in the database: nothing was reset, migrated or dropped there. */
+const sentinelIntact = (name: string) =>
+  withDb(name, async (c) => {
+    const tables = (await c.query(`SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1`)).rows.map((r) => r.tablename);
+    const row = tables.includes("guard_sentinel") ? (await c.query(`SELECT id FROM guard_sentinel`)).rows : [];
+    return { tables, row };
+  });
+const INTACT = { tables: ["guard_sentinel"], row: [{ id: 42 }] };
+const DIFF = ["migrate", "diff", "--from-migrations", "prisma/migrations", "--to-schema", "prisma/schema.prisma", "--exit-code"];
 const out = (r: { stdout: string; stderr: string }) => r.stdout + r.stderr;
 
 describe("prisma.config.ts database / environment guard (real Prisma CLI)", () => {
@@ -116,5 +135,85 @@ describe("prisma.config.ts database / environment guard (real Prisma CLI)", () =
     } finally {
       await dropDatabase(server, shadow);
     }
+  });
+});
+
+describe("prisma.config.ts guards SHADOW_DATABASE_URL as well (real Prisma CLI)", () => {
+  it.each([
+    ["local", "local + non-test database + test shadow"],
+    ["staging", "staging + non-test database + test shadow"],
+    ["production", "production + non-test database + test shadow"],
+    ["", "missing NAZIR_RUNTIME_ENV (=> production) + non-test database + test shadow"],
+    ["prod", "unknown NAZIR_RUNTIME_ENV (=> production) + non-test database + test shadow"],
+  ])("NAZIR_RUNTIME_ENV=%j: %s is refused before the command and the shadow database is not touched", async (env) => {
+    expect(await sentinelIntact(shadowTest)).toEqual(INTACT);
+    const res = await runPrisma(DIFF, { databaseUrl: devDb.url, shadowUrl: server.urlFor(shadowTest), env: { NAZIR_RUNTIME_ENV: env } });
+    expect(res.code).not.toBe(0);
+    expect(out(res)).toMatch(/Prisma CLI refused before running any command: SHADOW_DATABASE_URL: .*must not be used with NAZIR_RUNTIME_ENV=/);
+    expect(await sentinelIntact(shadowTest)).toEqual(INTACT); // a shadow reset would have dropped the sentinel
+  });
+
+  it("test + test database + non-test shadow is refused and the shadow database is not touched", async () => {
+    const res = await runPrisma(DIFF, { databaseUrl: testDb.url, shadowUrl: server.urlFor(shadowDev), env: { NAZIR_RUNTIME_ENV: "test" } });
+    expect(res.code).not.toBe(0);
+    expect(out(res)).toMatch(/SHADOW_DATABASE_URL: NAZIR_RUNTIME_ENV=test requires a database whose name ends with "_test"/);
+    expect(await sentinelIntact(shadowDev)).toEqual(INTACT);
+  });
+
+  it("every command is refused, not only diff: `migrate deploy` with a forbidden shadow leaves the database empty", async () => {
+    const fresh = newThrowawayName("dev"); // (emptyDev is migrated by an earlier test of this file)
+    await createDatabase(server, fresh);
+    try {
+      expect(await tablesIn(fresh)).toBe(0);
+      const res = await runPrisma(["migrate", "deploy"], { databaseUrl: server.urlFor(fresh), shadowUrl: server.urlFor(shadowTest), env: { NAZIR_RUNTIME_ENV: "local" } });
+      expect(res.code).not.toBe(0);
+      expect(out(res)).toMatch(/SHADOW_DATABASE_URL/);
+      expect(await tablesIn(fresh)).toBe(0); // not even _prisma_migrations
+      expect(await sentinelIntact(shadowTest)).toEqual(INTACT);
+    } finally {
+      await dropDatabase(server, fresh);
+    }
+  });
+
+  it.each([
+    ["the same test database", () => testDb.url, () => testDb.url, "test"],
+    ["the same non-test database", () => devDb.url, () => devDb.url, "local"],
+    ["the same database through another loopback spelling", () => devDb.url, () => devDb.url.replace("127.0.0.1", "localhost"), "local"],
+  ] as const)("%s as DATABASE_URL and SHADOW_DATABASE_URL is refused and the database keeps its data", async (_label, database, shadow, env) => {
+    const before = await withDb(env === "test" ? testDb.name : devDb.name, async (c) => (await c.query(`SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public'`)).rows[0].n as number);
+    const res = await runPrisma(DIFF, { databaseUrl: database(), shadowUrl: shadow(), env: { NAZIR_RUNTIME_ENV: env } });
+    expect(res.code).not.toBe(0);
+    expect(out(res)).toMatch(/SHADOW_DATABASE_URL must not be the same database as DATABASE_URL/);
+    expect(await tablesIn(env === "test" ? testDb.name : devDb.name)).toBe(before); // a shadow reset would have emptied it
+  });
+
+  it("allowed pairs work: local + non-test shadow and test + test shadow; the shadow database is the one the CLI rewrites", async () => {
+    expect(await sentinelIntact(shadowDev)).toEqual(INTACT);
+    const local = await runPrisma(DIFF, { databaseUrl: devDb.url, shadowUrl: server.urlFor(shadowDev), env: { NAZIR_RUNTIME_ENV: "local" } });
+    expect(local.code, out(local)).toBe(0);
+    // positive control: this is what a refused command would have done to the shadow database
+    expect(await sentinelIntact(shadowDev)).not.toEqual(INTACT);
+
+    const shadow = newThrowawayName("test");
+    await createDatabase(server, shadow);
+    try {
+      const test = await runPrisma(DIFF, { databaseUrl: testDb.url, shadowUrl: server.urlFor(shadow), env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(test.code, out(test)).toBe(0);
+    } finally {
+      await dropDatabase(server, shadow);
+    }
+  });
+
+  it("without a shadow database nothing changes: validate and migrate status work, migrate diff --from-migrations fails as Prisma itself does (no guard message)", async () => {
+    for (const [env, url] of [["local", devDb.url], ["test", testDb.url]] as const) {
+      const validate = await runPrisma(["validate"], { databaseUrl: url, env: { NAZIR_RUNTIME_ENV: env } });
+      expect(validate.code, out(validate)).toBe(0);
+      const status = await runPrisma(["migrate", "status"], { databaseUrl: url, env: { NAZIR_RUNTIME_ENV: env } });
+      expect(status.code, out(status)).toBe(0);
+    }
+    const noShadow = await runPrisma(DIFF, { databaseUrl: devDb.url, env: { NAZIR_RUNTIME_ENV: "local" } });
+    expect(noShadow.code).not.toBe(0);
+    expect(out(noShadow)).toMatch(/shadowDatabaseUrl/); // Prisma's own "set datasource.shadowDatabaseUrl" message
+    expect(out(noShadow)).not.toMatch(/Prisma CLI refused/);
   });
 });

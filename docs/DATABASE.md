@@ -1264,7 +1264,7 @@ FK 삭제 정책: 주문·결제·환불·티켓·인증·로그는 `ON DELETE R
 - Prisma가 schema에 없는 DB 객체를 drift로 보고 이후 migration에서 DROP하거나 누락할 수 있으므로, **생성된 migration SQL을 매번 검토**하고 raw SQL 객체를 제거하는 문장이 없는지 확인한다. 사용하는 Prisma 버전의 partial index 등 지원 여부는 도입 시점에 공식 문서로 확인하고, 지원되더라도 계약 테스트는 유지한다.
 - **스키마 계약 테스트(CI 필수)**: 빈 PostgreSQL에 `migrate deploy` 후 `pg_indexes`/`pg_constraint`를 조회해 §13.3·§14의 필수 제약이 모두 존재하는지 검사한다(TEST MIG-*).
 - 공유 환경(staging/production)에서는 `migrate deploy`만 사용하고 `db push`를 금지한다.
-- **Prisma CLI 환경 가드** [채택 A-042]: `prisma.config.ts`가 설정을 읽는 시점(모든 CLI 명령 실행 전)에 `DATABASE_URL`이 있으면 `NAZIR_RUNTIME_ENV`와 DB 이름이 일치하는지 검사한다(`src/server/config/prisma-cli-guard.ts`). `test`는 `_test` DB만, 그 외 환경(`local`·`staging`·`production`)은 `_test` DB를 거부하며, `NAZIR_RUNTIME_ENV` 누락·미지의 값은 `production`으로 간주한다. `DATABASE_URL`이 없으면 검사하지 않아 `prisma validate`·`prisma generate`는 그대로 동작한다. `SHADOW_DATABASE_URL`은 검사 없이 그대로 전달한다. 거부는 명령이 시작되기 전이라 DB는 변경되지 않는다(테스트 `cli-guard.test.ts`가 실제 `migrate deploy`·`migrate reset`으로 확인). 로컬 개발은 `.env.local`에 `NAZIR_RUNTIME_ENV=local`이 있어야 한다(`.env.example`).
+- **Prisma CLI 환경 가드** [채택 A-042]: `prisma.config.ts`가 설정을 읽는 시점(모든 CLI 명령 실행 전)에 `DATABASE_URL`과 `SHADOW_DATABASE_URL`을 `NAZIR_RUNTIME_ENV`와 대조한다(`src/server/config/prisma-cli-guard.ts`). `test`는 `_test` DB만, 그 외 환경(`local`·`staging`·`production`)은 `_test` DB를 거부하며, `NAZIR_RUNTIME_ENV` 누락·미지의 값은 `production`으로 간주한다. **Shadow DB는 `migrate dev`·`migrate diff --from-migrations`에서 CLI가 초기화·재작성하므로 주 DB와 같은 규칙을 적용한다**(예: `local` + 개발 DB + `_test` Shadow DB 거부, `test` + `_test` DB + 비test Shadow DB 거부). **`DATABASE_URL`과 `SHADOW_DATABASE_URL`이 같은 DB(같은 서버·포트·DB 이름, loopback 표기 차이·계정·쿼리 무시)를 가리키면 거부한다.** `DATABASE_URL`이 없으면 주 DB 검사는 하지 않아 `prisma validate`·`prisma generate`는 그대로 동작하고, `SHADOW_DATABASE_URL`이 미설정이면(또는 빈 문자열이면) 기존 동작과 같다. Shadow만 설정된 경우에도 검사한다. 오류 메시지는 변수 이름과 DB 이름만 담고 URL·비밀번호는 담지 않는다. 거부는 명령이 시작되기 전이라 DB와 Shadow DB는 변경되지 않는다(테스트 `cli-guard.test.ts`가 실제 `migrate deploy`·`migrate reset`·`migrate diff`로 확인). 로컬 개발은 `.env.local`에 `NAZIR_RUNTIME_ENV=local`이 있어야 한다(`.env.example`).
 - **모든 migration은 `BEGIN; … COMMIT;`으로 감싼다** [채택 A-037, S1]. Prisma Migrate는 migration을 트랜잭션으로 실행하지 않아(7.10.1 실측) 중간에 실패하면 앞 문장이 DB에 남고 이후 배포가 막힌다(P3009). `migrate dev --create-only`가 만든 SQL에도 직접 감싼다. 트랜잭션 안에서 실행할 수 없는 문장(`CREATE INDEX CONCURRENTLY` 등)은 별도 migration으로 분리하고 파일 맨 위에 `-- no-transaction: <사유>`를 둔다(트랜잭션 제어 문장 없이, 문장 1개). 테스트 MIG-09(정적), MIG-10(실패 주입)이 이를 강제한다. 실패 시 복구는 §19.9.
 - 행 잠금(`FOR UPDATE`, `SKIP LOCKED`)은 Prisma Client API로 표현되지 않으므로 parameterized raw query로 작성한다. 문자열 연결 SQL 금지.
 - unique 위반(PostgreSQL 23505 / Prisma P2002)은 제약 이름별로 도메인 오류(409 `SEAT_UNAVAILABLE`, `ACTIVE_ORDER_EXISTS` 등)로 변환한다. CHECK 위반(23514)도 제약 이름별로 변환한다.
@@ -1356,6 +1356,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.4 | 2026-11-17 | Step 2 후속(사용자 지시): `SUCCEEDED` ⇒ `approved_at` CHECK(A-038 보강), 결제수단 요청값 `requested_method_type`(불변)·PG 원문 `provider_method_raw`(A-039, Q-027 채택안 ①), 인증 세션 4열 복합 FK + 지연 constraint trigger 2개(A-040, Q-028), 원장성 테이블 4개 보호(`admin_audit_logs`·`payment_status_logs`·`refund_items` UPDATE+DELETE, `refunds` DELETE; A-041, Q-029 한정 범위). §6.2·§6.3·§7.1·§7.3~§7.5·§9.3·§13.3·§14·§19 갱신. A-001~A-037, D-001~D-015는 변경 없음 |
 | 1.2.5 | 2026-11-18 | Step 2 최종 보완: CHECK `payments_unapproved_method_matches_request_ck`(`status = 'SUCCEEDED' OR method_type = requested_method_type`) 추가(A-039 보강, §7.1·§13.3·§14·§19). 기존 제약·A-039 구조는 변경 없음. A-001~A-037, D-001~D-015 변경 없음 |
 | 1.2.6 | 2026-11-18 | PR #2 기술 리뷰 후속(A-042): `SUCCEEDED` 결제의 승인 증거 불변 트리거(§7.1 컬럼 분류표), `refunds` 핵심 필드 불변 트리거와 `SEAT` 환불 합계 지연 constraint trigger 2개(§7.4), Prisma CLI 환경 가드(§14.1). §7.5·§13.3·§14·§19 갱신, §19.8의 "승인 후 UPDATE 가능" 서술 정정. A-041의 refunds UPDATE 허용과 A-001~A-037, D-001~D-015는 변경 없음 |
+| 1.2.7 | 2026-11-18 | Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사(A-042 보강, §14.1): 환경 규칙(`test` ⇔ `_test`) 동일 적용, 주 DB와 같은 DB 거부, 미설정 시 기존 동작. 다른 항목 변경 없음 |
 
 ---
 
@@ -1386,7 +1387,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | `prisma/migrations/20261116140100_integrity_constraints/migration.sql` | **수기 raw SQL**(`BEGIN; … COMMIT;`): partial unique 6개, CHECK 55개, 행 트리거 13개(`order_items`·`payments`·원장성 4개 테이블), 지연 constraint trigger 6개(주문↔결제 2, 인증 claim 2, `SEAT` 환불 합계 2), 함수 14개 |
 | `prisma/migrations/migration_lock.toml` | `provider = "postgresql"` |
 | `prisma.config.ts` | Prisma 7 CLI 설정(`.env.local`→`.env` 로드, `DATABASE_URL`, `SHADOW_DATABASE_URL`, seed 명령) + **명령 실행 전 DB·환경 가드**(A-042) |
-| `src/server/config/prisma-cli-guard.ts` | Prisma CLI 환경 가드(순수 함수, `prisma.config.ts`가 호출). `DATABASE_URL`이 있으면 `NAZIR_RUNTIME_ENV`와 DB 이름 일치를 검사 |
+| `src/server/config/prisma-cli-guard.ts` | Prisma CLI 환경 가드(순수 함수, `prisma.config.ts`가 호출). `DATABASE_URL`과 `SHADOW_DATABASE_URL`이 `NAZIR_RUNTIME_ENV`와 맞는지, 두 URL이 같은 DB가 아닌지 검사 |
 | `prisma/seed.ts` | 개발·테스트 전용 임시 seed(§19.9) |
 | `src/server/db/constants.ts` | 상태값·제약 이름 상수(DB CHECK와 1:1, 테스트 MIG-03b·DB_CONSTRAINT 검증이 대조) |
 | `src/server/db/payment-method.ts` | 결제수단 요청값·PG 원문의 저장 규칙(순수 함수). DB CHECK와 같은 규칙을 서비스가 먼저 적용해 오류 대신 도메인 판단을 하게 한다(A-039). 결제 서비스 자체는 Step 6 |
