@@ -6,8 +6,9 @@
  *  - Its database name must end with `_test` and its host must be local (127.0.0.1/localhost/::1),
  *    unless NAZIR_TEST_DB_ALLOW_REMOTE=1 is set deliberately.
  *  - The named database itself is never written to. The harness connects to the server's maintenance
- *    database, creates THROWAWAY databases named `nazir_ct_<timestamp>_<random>_test`, and only ever
- *    drops databases matching that pattern.
+ *    database, creates THROWAWAY databases named `nazir_ct_<timestamp>_<random>_test` (or `..._dev` for the few tests that
+ *    need a database that is NOT a test database, e.g. the Prisma CLI environment guard), and only ever drops
+ *    databases matching that pattern.
  */
 import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -23,7 +24,7 @@ export const MIGRATIONS_DIR = resolve(REPO_ROOT, "prisma/migrations");
 export const SCHEMA_PATH = resolve(REPO_ROOT, "prisma/schema.prisma");
 const PRISMA_BIN = resolve(REPO_ROOT, "node_modules/prisma/build/index.js");
 
-const THROWAWAY = /^nazir_ct_(\d+)_[0-9a-f]{8}_test$/;
+const THROWAWAY = /^nazir_ct_(\d+)_[0-9a-f]{8}_(test|dev)$/;
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 export interface TestServer {
@@ -64,8 +65,9 @@ export function resolveTestServer(env: NodeJS.ProcessEnv = process.env): TestSer
   return { adminUrl: withDb("postgres"), urlFor: withDb };
 }
 
-export function newThrowawayName(): string {
-  return `nazir_ct_${Date.now()}_${randomBytes(4).toString("hex")}${TEST_DB_SUFFIX}`;
+/** `test` (default): a `*_test` database. `dev`: a throwaway database that is deliberately NOT a test database. */
+export function newThrowawayName(kind: "test" | "dev" = "test"): string {
+  return `nazir_ct_${Date.now()}_${randomBytes(4).toString("hex")}${kind === "test" ? TEST_DB_SUFFIX : "_dev"}`;
 }
 
 function assertThrowaway(name: string) {
@@ -99,7 +101,7 @@ export async function dropDatabase(server: TestServer, name: string): Promise<vo
 export async function sweepStaleDatabases(server: TestServer): Promise<void> {
   await withAdmin(server, async (c) => {
     const { rows } = await c.query<{ datname: string }>(
-      `SELECT datname FROM pg_database WHERE datname LIKE 'nazir\\_ct\\_%\\_test'`,
+      `SELECT datname FROM pg_database WHERE datname LIKE 'nazir\\_ct\\_%'`,
     );
     for (const { datname } of rows) {
       const m = THROWAWAY.exec(datname);
@@ -122,7 +124,9 @@ export function runPrisma(
   opts: { databaseUrl: string; shadowUrl?: string; env?: Record<string, string>; cwd?: string },
 ): Promise<CliResult> {
   return new Promise((resolvePromise, reject) => {
-    const env: NodeJS.ProcessEnv = { ...process.env, ...opts.env, DATABASE_URL: opts.databaseUrl };
+    // NAZIR_RUNTIME_ENV defaults to `test` (throwaway databases are test databases) instead of whatever the shell has;
+    // tests that exercise the environment guard pass it explicitly ("" = missing).
+    const env: NodeJS.ProcessEnv = { ...process.env, NAZIR_RUNTIME_ENV: "test", ...opts.env, DATABASE_URL: opts.databaseUrl };
     // `prisma db seed` runs "tsx prisma/seed.ts" through the shell: make node_modules/.bin resolvable (npx would do this).
     env.PATH = `${resolve(REPO_ROOT, "node_modules/.bin")}:${env.PATH ?? ""}`;
     if (opts.shadowUrl) env.SHADOW_DATABASE_URL = opts.shadowUrl;
@@ -183,8 +187,8 @@ export class TestDb {
 }
 
 /** Clones the pre-migrated template into a fresh private database for one test file. */
-export async function cloneTestDb(server: TestServer, templateName: string): Promise<TestDb> {
-  const name = newThrowawayName();
+export async function cloneTestDb(server: TestServer, templateName: string, kind: "test" | "dev" = "test"): Promise<TestDb> {
+  const name = newThrowawayName(kind);
   await createDatabase(server, name, templateName);
   return new TestDb(server, name);
 }

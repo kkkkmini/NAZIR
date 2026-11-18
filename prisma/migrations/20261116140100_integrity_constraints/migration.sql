@@ -592,4 +592,150 @@ CREATE CONSTRAINT TRIGGER "identity_verifications_claim_guard"
   FOR EACH ROW
   EXECUTE FUNCTION "identity_verifications_check_consumed"();
 
+-- ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+-- F. PR #2 review follow-up: the approval record of a SUCCEEDED payment and the monetary core of a refund
+-- ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+--
+-- F1. A SUCCEEDED payment is the ledger entry of money the PG actually took. Once the row is SUCCEEDED the following
+-- columns are IMMUTABLE (PRIMARY and EXCESS alike); everything is written by the single UPDATE that makes the payment
+-- SUCCEEDED (DATABASE.md §11.7), so nothing legitimate needs to change them afterwards:
+--   status, order_id, provider, currency,
+--   merchant_payment_ref, provider_payment_id, pg_transaction_id          (identity of the PG transaction)
+--   requested_amount, approved_amount, approved_at                        (what was asked / approved / when)
+--   method_type, provider_method_raw, easy_pay_provider, card_company     (how the PG says it was paid)
+-- (requested_method_type has its own trigger since A-039.) Deliberately NOT frozen, because requery / refund /
+-- reconciliation write them on approved payments: refunded_amount, last_verified_at, requery_count, next_requery_at,
+-- unknown_since, confirm_started_at, failed_at, canceled_at, failure_code, failure_message, updated_at, return_nonce_hash,
+-- checkout_expires_at, and role (PRIMARY <-> confirmed order is governed by the deferred S3 triggers; role cannot leave
+-- NULL-ness because of payments_succeeded_role_ck). Leaving SUCCEEDED (EXCESS -> FAILED / CANCELED) is the same
+-- falsification as editing the amount, so `status` is frozen too. The trigger only fires for rows that ARE SUCCEEDED, so
+-- the READY / CONFIRMING / UNKNOWN -> SUCCEEDED transition itself is unaffected.
+CREATE FUNCTION "payments_reject_approved_evidence_change"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  changed text[] := ARRAY[]::text[];
+BEGIN
+  IF NEW."status"               IS DISTINCT FROM OLD."status"               THEN changed := array_append(changed, 'status'); END IF;
+  IF NEW."order_id"             IS DISTINCT FROM OLD."order_id"             THEN changed := array_append(changed, 'order_id'); END IF;
+  IF NEW."provider"             IS DISTINCT FROM OLD."provider"             THEN changed := array_append(changed, 'provider'); END IF;
+  IF NEW."currency"             IS DISTINCT FROM OLD."currency"             THEN changed := array_append(changed, 'currency'); END IF;
+  IF NEW."merchant_payment_ref" IS DISTINCT FROM OLD."merchant_payment_ref" THEN changed := array_append(changed, 'merchant_payment_ref'); END IF;
+  IF NEW."provider_payment_id"  IS DISTINCT FROM OLD."provider_payment_id"  THEN changed := array_append(changed, 'provider_payment_id'); END IF;
+  IF NEW."pg_transaction_id"    IS DISTINCT FROM OLD."pg_transaction_id"    THEN changed := array_append(changed, 'pg_transaction_id'); END IF;
+  IF NEW."requested_amount"     IS DISTINCT FROM OLD."requested_amount"     THEN changed := array_append(changed, 'requested_amount'); END IF;
+  IF NEW."approved_amount"      IS DISTINCT FROM OLD."approved_amount"      THEN changed := array_append(changed, 'approved_amount'); END IF;
+  IF NEW."approved_at"          IS DISTINCT FROM OLD."approved_at"          THEN changed := array_append(changed, 'approved_at'); END IF;
+  IF NEW."method_type"          IS DISTINCT FROM OLD."method_type"          THEN changed := array_append(changed, 'method_type'); END IF;
+  IF NEW."provider_method_raw"  IS DISTINCT FROM OLD."provider_method_raw"  THEN changed := array_append(changed, 'provider_method_raw'); END IF;
+  IF NEW."easy_pay_provider"    IS DISTINCT FROM OLD."easy_pay_provider"    THEN changed := array_append(changed, 'easy_pay_provider'); END IF;
+  IF NEW."card_company"         IS DISTINCT FROM OLD."card_company"         THEN changed := array_append(changed, 'card_company'); END IF;
+  IF cardinality(changed) > 0 THEN
+    RAISE EXCEPTION 'payments % is SUCCEEDED: its approval record is immutable (rejected change of: %)', OLD."id", array_to_string(changed, ', ')
+      USING ERRCODE = 'restrict_violation', TABLE = 'payments', CONSTRAINT = 'payments_approved_evidence_immutable',
+            HINT = 'Record refunds in refunded_amount and re-verification in last_verified_at / requery_count; the approval itself is never edited.';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+-- AFTER (not BEFORE) on purpose: PostgreSQL checks CHECK constraints and fires the FK triggers before AFTER row triggers,
+-- so a change that also violates a domain rule (e.g. PRIMARY approved_amount <> order total) keeps reporting that rule by
+-- name (payments_primary_amount_ck, ...) and this trigger refuses whatever the other constraints would have let through.
+CREATE TRIGGER "payments_approved_evidence_no_change"
+  AFTER UPDATE ON "payments"
+  FOR EACH ROW
+  WHEN (OLD."status" = 'SUCCEEDED')
+  EXECUTE FUNCTION "payments_reject_approved_evidence_change"();
+
+-- F2. A refund keeps its status lifecycle (REQUESTED -> VERIFYING -> COMPLETED / FAILED / WITHDRAWN, Q-029: UPDATE stays
+-- allowed), but what it IS is fixed when it is created:
+--   immutable:  id, order_id, payment_id, refund_type, provider, total_amount, requested_by_admin_id, created_at
+--   updatable:  status, provider_refund_id, pg_executed_by_admin_id, verified_at, completed_at, failure_reason, reason,
+--               updated_at
+CREATE FUNCTION "refunds_reject_core_change"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  changed text[] := ARRAY[]::text[];
+BEGIN
+  IF NEW."id"                    IS DISTINCT FROM OLD."id"                    THEN changed := array_append(changed, 'id'); END IF;
+  IF NEW."order_id"              IS DISTINCT FROM OLD."order_id"              THEN changed := array_append(changed, 'order_id'); END IF;
+  IF NEW."payment_id"            IS DISTINCT FROM OLD."payment_id"            THEN changed := array_append(changed, 'payment_id'); END IF;
+  IF NEW."refund_type"           IS DISTINCT FROM OLD."refund_type"           THEN changed := array_append(changed, 'refund_type'); END IF;
+  IF NEW."provider"              IS DISTINCT FROM OLD."provider"              THEN changed := array_append(changed, 'provider'); END IF;
+  IF NEW."total_amount"          IS DISTINCT FROM OLD."total_amount"          THEN changed := array_append(changed, 'total_amount'); END IF;
+  IF NEW."requested_by_admin_id" IS DISTINCT FROM OLD."requested_by_admin_id" THEN changed := array_append(changed, 'requested_by_admin_id'); END IF;
+  IF NEW."created_at"            IS DISTINCT FROM OLD."created_at"            THEN changed := array_append(changed, 'created_at'); END IF;
+  IF cardinality(changed) > 0 THEN
+    RAISE EXCEPTION 'refunds % : the core of a refund is immutable (rejected change of: %)', OLD."id", array_to_string(changed, ', ')
+      USING ERRCODE = 'restrict_violation', TABLE = 'refunds', CONSTRAINT = 'refunds_core_immutable',
+            HINT = 'Withdraw / fail the refund (status) and create a new one instead of editing its amount, payment or type.';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+-- AFTER for the same reason as payments_approved_evidence_no_change: refunds_payment_order_fk and the CHECKs report first.
+CREATE TRIGGER "refunds_core_no_change"
+  AFTER UPDATE ON "refunds"
+  FOR EACH ROW
+  EXECUTE FUNCTION "refunds_reject_core_change"();
+
+-- F3. refunds.total_amount = SUM(refund_items.amount) for SEAT refunds (DATABASE.md §7.5 rule 1), enforced at COMMIT:
+-- the refund row and its items are written in one transaction in either order. refund_items are append-only and
+-- total_amount is immutable (F2), so after the creating transaction commits the relation can only break by INSERTing
+-- another item, which the second trigger catches. A SEAT refund needs at least one item; a PAYMENT_EXCESS refund has none.
+CREATE FUNCTION "refunds_assert_items_consistent"(rid uuid) RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+  r record;
+  item_count bigint;
+  item_sum numeric;
+BEGIN
+  SELECT f."refund_type", f."total_amount" INTO r FROM "refunds" f WHERE f."id" = rid;
+  IF NOT FOUND THEN
+    RETURN;
+  END IF;
+  SELECT count(*), COALESCE(sum(i."amount"), 0) INTO item_count, item_sum FROM "refund_items" i WHERE i."refund_id" = rid;
+
+  IF r."refund_type" = 'SEAT' AND item_count = 0 THEN
+    RAISE EXCEPTION 'SEAT refund % has no refund_items', rid
+      USING ERRCODE = 'check_violation', TABLE = 'refunds', CONSTRAINT = 'refunds_seat_items_total_ck';
+  ELSIF r."refund_type" = 'SEAT' AND item_sum <> r."total_amount" THEN
+    RAISE EXCEPTION 'SEAT refund % total_amount % does not equal the sum of its refund_items %', rid, r."total_amount", item_sum
+      USING ERRCODE = 'check_violation', TABLE = 'refunds', CONSTRAINT = 'refunds_seat_items_total_ck';
+  ELSIF r."refund_type" = 'PAYMENT_EXCESS' AND item_count > 0 THEN
+    RAISE EXCEPTION 'PAYMENT_EXCESS refund % must not have refund_items (found %)', rid, item_count
+      USING ERRCODE = 'check_violation', TABLE = 'refund_items', CONSTRAINT = 'refunds_excess_no_items_ck';
+  END IF;
+END;
+$$;
+
+CREATE FUNCTION "refunds_check_items"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM "refunds_assert_items_consistent"(NEW."id");
+  RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION "refund_items_check_refund"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM "refunds_assert_items_consistent"(NEW."refund_id");
+  RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER "refunds_items_guard"
+  AFTER INSERT ON "refunds"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "refunds_check_items"();
+
+CREATE CONSTRAINT TRIGGER "refund_items_refund_guard"
+  AFTER INSERT ON "refund_items"
+  DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW
+  EXECUTE FUNCTION "refund_items_check_refund"();
+
 COMMIT;

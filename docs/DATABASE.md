@@ -653,6 +653,17 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 - `CHECK (provider_method_raw IS NULL OR (btrim(provider_method_raw) <> '' AND provider_method_raw !~ '[0-9]{9,}' AND provider_method_raw !~ '@' AND provider_method_raw !~ '[[:cntrl:]]'))` (`payments_provider_method_raw_ck`) — 원문 라벨이 카드번호·계좌번호·전화번호(9자리 이상 숫자)·이메일(`@`)·제어문자를 담지 못하게 하는 **최소 방어**다. 의미 있는 검열이 아니라 사고 방지용이며, 저장 전 마스킹은 adapter 책임이다 [채택 A-039]
 - `CHECK (status = 'SUCCEEDED' OR method_type = requested_method_type)` (`payments_unapproved_method_matches_request_ck`) — **`method_type`이 요청 수단과 달라지는 것은 PG 승인(`SUCCEEDED`)을 확인한 뒤에만 허용한다.** `READY`·`CONFIRMING`·`UNKNOWN`·`FAILED`·`CANCELED`에서는 두 값이 같아야 하며, 생성 시 서버가 `paymentCreationMethodColumns()`로 두 컬럼을 같은 값으로 쓰고 승인 UPDATE만 `method_type`을 PG가 보고한 값으로 바꾼다. 이전에는 `requested_method_type = CARD`·`method_type = EASY_PAY`인 `READY` 결제가 DB에 들어갈 수 있었다. `SUCCEEDED`에서는 `CARD→CARD`, `CARD→EASY_PAY`, `CARD→OTHER`, `EASY_PAY→OTHER` 등 PG 결과대로 기록할 수 있다. 세 컬럼(`status`, `method_type`, `requested_method_type`)이 모두 NOT NULL이라 NULL 때문에 검사가 통과하는 경우가 없다 [채택 A-039]
 - **`requested_method_type` 불변(행 트리거 `payments_requested_method_no_change`, BEFORE UPDATE OF `requested_method_type`, 값이 바뀔 때만)**: 값이 바뀌는 UPDATE는 SQLSTATE `23001`로 거부한다. 같은 값으로의 UPDATE는 통과한다. 허용되는 수단 전이: `CARD→CARD`, `EASY_PAY→EASY_PAY`(PG가 같은 수단으로 승인), `CARD→OTHER`, `EASY_PAY→OTHER`(`method_type`만 바뀌고 요청값은 유지). 그 밖의 전이는 기존 `payments_method_type_other_ck`와 상태 전이 규칙이 다룬다 [채택 A-039]
+- **승인 증거 불변(행 트리거 `payments_approved_evidence_no_change`, AFTER UPDATE, `WHEN OLD.status = 'SUCCEEDED'`, 함수 `payments_reject_approved_evidence_change`)** [채택 A-042]: `SUCCEEDED`가 된 결제는 `PRIMARY`·`EXCESS` 모두 아래 승인 증거 컬럼을 바꿀 수 없고(`SUCCEEDED`에서 벗어나는 `FAILED`/`CANCELED` 강등 포함) SQLSTATE `23001`(제약 이름 `payments_approved_evidence_immutable`)로 거부된다. 승인 증거는 `SUCCEEDED`로 만드는 **그 UPDATE 한 번**에 모두 쓴다(§11.7). 값이 같은 UPDATE(`SET approved_amount = approved_amount`)는 변경이 아니므로 통과한다. 트리거는 AFTER라 CHECK·FK가 먼저 판정하므로 도메인 규칙 위반은 계속 그 제약 이름으로 보고된다. 컬럼 분류:
+
+| 분류 | 컬럼 | `SUCCEEDED` 이후 UPDATE |
+|---|---|---|
+| **불변 — 승인 증거** | `approved_amount`, `approved_at`, `method_type`, `provider_method_raw`, `easy_pay_provider`, `card_company` | **거부**(NULL에서 값 채우기·값에서 NULL로 지우기 포함) |
+| **불변 — PG 거래 식별** | `merchant_payment_ref`, `provider_payment_id`, `pg_transaction_id`, `provider` | **거부** |
+| **불변 — 소속·상태** | `status`(`SUCCEEDED` 유지), `order_id`, `requested_amount`(복합 FK `payments_order_total_fk`가 이미 고정하며 트리거에도 중복 나열), `currency`, `requested_method_type`(A-039 트리거) | **거부** |
+| 허용 — 운영 | `refunded_amount`(환불 완료 누적), `last_verified_at`, `requery_count`, `next_requery_at`, `unknown_since`, `confirm_started_at`, `failure_code`, `failure_message`, `failed_at`, `canceled_at`, `return_nonce_hash`, `checkout_expires_at`, `updated_at` | 허용 |
+| 허용 — 다른 규칙이 관장 | `role`(`PRIMARY` ⇔ 주문의 확정 결제는 지연 constraint trigger 2개와 `payments_succeeded_role_ck`가 판정) | 허용(해당 규칙을 통과할 때만) |
+
+  `SUCCEEDED` 이전(`READY`·`CONFIRMING`·`UNKNOWN`·`FAILED`·`CANCELED`)에는 모든 컬럼을 쓸 수 있다(결제키 수신 시 `provider_payment_id` 기록 등). 이전에는 `EXCESS` 결제의 `approved_amount`·`merchant_payment_ref` 등이 승인 후에도 임의 UPDATE로 바뀌고 `EXCESS`가 `FAILED`/`CANCELED`로 강등되어 승인 사실이 지워질 수 있었다(`PRIMARY`는 금액 CHECK와 지연 trigger가 일부만 막았다).
 - **결제 원장 보존: `payments` 행은 삭제하지 않는다.** DELETE는 트리거 `payments_no_delete`가 SQLSTATE `23001`로 거부한다. 결제 시도·승인 이력 전체(`READY`·`FAILED`·`CANCELED`·`EXCESS` 포함)가 원장이며, 폐기할 결제는 `CANCELED`/`FAILED`로 전이한다(§12.2). 이전에는 참조되지 않는 행이 삭제될 수 있었고 로그 행의 FK가 우연히 막을 뿐이었다 [채택 A-038, §1.1 원칙 3]
 - **주문당 `PRIMARY` 결제 1건:** `UNIQUE (order_id) WHERE role = 'PRIMARY'`. `EXCESS`는 제한 없이 여러 건 보존한다(중복 승인 이력 보존) [채택 A-032]
 - `CHECK (role IS DISTINCT FROM 'PRIMARY' OR (approved_amount IS NOT NULL AND approved_amount = requested_amount))` — **`PRIMARY`의 승인 금액 = 요청 금액** (`EXCESS`는 달라도 된다) [채택 A-032]
@@ -773,6 +784,15 @@ Phase 1: 운영자가 **DB에 환불 요청을 먼저 기록**하고, PG 관리�
 
 **환불 원장 보존** [채택 A-041]: `refunds` 행은 삭제하지 않는다(트리거 `refunds_no_delete`, SQLSTATE `23001`). **UPDATE는 허용한다** — 환불은 `REQUESTED → VERIFYING → COMPLETED/FAILED/WITHDRAWN`로 상태가 바뀌는 진행형 행이기 때문이다. 폐기는 `WITHDRAWN`/`FAILED`로 전이한다.
 
+**환불 핵심 정보 불변** [채택 A-042]: UPDATE는 허용하되 환불이 생성될 때 확정된 핵심 정보는 바꿀 수 없다(행 트리거 `refunds_core_no_change`, AFTER UPDATE, 함수 `refunds_reject_core_change`, SQLSTATE `23001`, 제약 이름 `refunds_core_immutable`). 값이 같은 UPDATE는 통과한다.
+
+| 분류 | 컬럼 | 환불 생성 이후 UPDATE |
+|---|---|---|
+| **불변** | `id`, `order_id`, `payment_id`, `refund_type`, `provider`, `total_amount`, `requested_by_admin_id`, `created_at` | **거부** |
+| 허용 | `status`(상태 전이), `provider_refund_id`, `pg_executed_by_admin_id`, `verified_at`, `completed_at`, `failure_reason`, `reason`, `updated_at` | 허용 |
+
+`SEAT` 환불의 `total_amount`는 **COMMIT 시점에** `SUM(refund_items.amount)`와 같아야 한다(지연 constraint trigger `refunds_items_guard`, `refund_items_refund_guard`). `SEAT` 환불은 항목이 1건 이상 있어야 하고 합계가 총액과 달라서는 안 되며(`refunds_seat_items_total_ck`), `PAYMENT_EXCESS` 환불에는 항목이 없어야 한다(`refunds_excess_no_items_ck`). 환불 행과 항목은 한 트랜잭션에서 환불 → 항목 순서로 쓰고(항목 FK가 환불을 요구한다), 오류는 COMMIT에서 SQLSTATE `23514`로 나온다. `total_amount`는 불변이고 `refund_items`는 추가 전용이므로 환불이 커밋된 뒤에는 **다른 항목을 추가하는 INSERT**로만 합계가 깨질 수 있고 그것도 COMMIT에서 거부된다.
+
 ### 7.5 `refund_items` — 좌석 환불 항목
 
 | 컬럼 | 타입 | 제약 / 설명 |
@@ -792,7 +812,7 @@ Phase 1: 운영자가 **DB에 환불 요청을 먼저 기록**하고, PG 관리�
 - **추가 전용** [채택 A-041]: UPDATE·DELETE를 모두 트리거(`refund_items_no_update`·`refund_items_no_delete`, SQLSTATE `23001`)가 거부한다. 환불 항목은 환불 생성 시 한 번 쓰고 바꾸지 않는다(정정은 환불 `WITHDRAWN`/`FAILED` 후 새 환불).
 
 검증 규칙(환불 생성·완료 트랜잭션, 결제 행 `FOR UPDATE` 하에서):
-1. `refunds.total_amount = SUM(refund_items.amount)` (`SEAT` 유형)
+1. `refunds.total_amount = SUM(refund_items.amount)` (`SEAT` 유형) — **DB가 COMMIT에서 최종 방어**(§7.4 [채택 A-042]), 서비스는 같은 값을 먼저 계산해 도메인 오류로 변환한다
 2. 한 주문 항목에 대해 `REQUESTED`/`VERIFYING`/`COMPLETED` 상태의 환불이 동시에 2건 이상 존재하지 않는다(Phase 1은 좌석당 1회 환불).
 3. `amount <= order_items.price`(취소 수수료 정책 확정 전까지 `amount = price`가 기본 [외부 확인 E-005])
 4. 결제별: `완료 누적 + 진행 중(REQUESTED/VERIFYING) 합계 + 신규 금액 <= approved_amount`. 완료 시에는 `payments.refunded_amount` CHECK가 최종 방어한다.
@@ -1196,6 +1216,8 @@ PG는 서버 승인(confirm)형을 전제로 한다[외부 확인 E-002]. PG con
 | 주문 항목 변경·삭제 | `order_items` UPDATE/DELETE 차단 트리거 |
 | 결제 행 삭제, 승인 금액·승인 시각 없는 `SUCCEEDED` | `payments` DELETE 차단 트리거, `SUCCEEDED` 승인 금액·승인 시각 CHECK [A-038] |
 | 감사·결제 상태 로그·환불 항목의 수정·삭제, 환불 행 삭제 | `admin_audit_logs`·`payment_status_logs`·`refund_items` UPDATE/DELETE 차단 트리거, `refunds` DELETE 차단 트리거 [A-041] |
+| 승인된 결제의 승인 증거 수정·강등 | `payments` 승인 증거 불변 트리거(`SUCCEEDED` 이후 `approved_amount`·`approved_at`·수단·PG 거래 식별값·`status` 등) [A-042] |
+| 환불 핵심 정보 변경, `SEAT` 환불 총액 ≠ 항목 합계 | `refunds` 핵심 불변 트리거, 지연 constraint trigger 2개(커밋 시점) [A-042] |
 | 중복 판매·중복 티켓 | `session_seats.sold_order_item_id` UNIQUE + CHECK, `tickets` 유효 partial unique, `tickets.order_item_id` UNIQUE |
 | 초과 환불 | `payments.refunded_amount` CHECK |
 | 소속 불일치 | §5~§8 복합 FK |
@@ -1222,11 +1244,11 @@ PostgreSQL 실제 환경에서 동시성 테스트를 수행한다. SQLite로 �
 | `purchase_quotas` | PK `(identity_subject_id, show_session_id)`, CHECK `counted_seats` |
 | `order_access_sessions` | `UNIQUE (token_hash)`, `(order_id, status)` |
 | `idempotency_records` | `UNIQUE (scope, owner_key_hash, idempotency_key_hash)`, `(expires_at)` |
-| `payments` | `UNIQUE (merchant_payment_ref)`, nullable unique 2개, `UNIQUE (id, order_id)`, 진행 중 partial unique, `PRIMARY` partial unique, 복합 FK `(order_id, requested_amount)`, CHECK 13개(수단·`OTHER`·금액·환불·역할·`PRIMARY` 금액·`SUCCEEDED` 승인 금액·승인 시각·요청 수단·`OTHER` 원문·원문 안전·미승인 수단=요청 수단), 지연 constraint trigger 1개, 행 트리거 2개(DELETE 차단, `requested_method_type` 불변), `(status, next_requery_at)` |
+| `payments` | `UNIQUE (merchant_payment_ref)`, nullable unique 2개, `UNIQUE (id, order_id)`, 진행 중 partial unique, `PRIMARY` partial unique, 복합 FK `(order_id, requested_amount)`, CHECK 13개(수단·`OTHER`·금액·환불·역할·`PRIMARY` 금액·`SUCCEEDED` 승인 금액·승인 시각·요청 수단·`OTHER` 원문·원문 안전·미승인 수단=요청 수단), 지연 constraint trigger 1개, 행 트리거 3개(DELETE 차단, `requested_method_type` 불변, 승인 증거 불변), `(status, next_requery_at)` |
 | `payment_webhook_events` | `UNIQUE (provider, deduplication_key)`, `(status, received_at)` |
 | `payment_status_logs` | `(payment_id, created_at)`, UPDATE·DELETE 차단 트리거 2개 |
-| `refunds` | 복합 FK, `UNIQUE (id, order_id)`, `UNIQUE (provider, provider_refund_id)`, DELETE 차단 트리거, `(status, updated_at)` |
-| `refund_items` | 복합 FK 2개, `UNIQUE (refund_id, order_item_id)`, UPDATE·DELETE 차단 트리거 2개, `(order_item_id)` |
+| `refunds` | 복합 FK, `UNIQUE (id, order_id)`, `UNIQUE (provider, provider_refund_id)`, DELETE 차단 트리거, 핵심 불변 트리거, 지연 constraint trigger 1개(`SEAT` 합계), `(status, updated_at)` |
+| `refund_items` | 복합 FK 2개, `UNIQUE (refund_id, order_item_id)`, UPDATE·DELETE 차단 트리거 2개, 지연 constraint trigger 1개(`SEAT` 합계), `(order_item_id)` |
 | `tickets` | `UNIQUE (ticket_number)`, `UNIQUE (order_item_id)`, 유효 티켓 partial unique, 복합 FK |
 | `admin_sessions` | `UNIQUE (token_hash)`, `(admin_id, status)` |
 | `admin_audit_logs` | `(admin_id, created_at)`, `(target_type, target_id)`, UPDATE·DELETE 차단 트리거 2개 |
@@ -1242,6 +1264,7 @@ FK 삭제 정책: 주문·결제·환불·티켓·인증·로그는 `ON DELETE R
 - Prisma가 schema에 없는 DB 객체를 drift로 보고 이후 migration에서 DROP하거나 누락할 수 있으므로, **생성된 migration SQL을 매번 검토**하고 raw SQL 객체를 제거하는 문장이 없는지 확인한다. 사용하는 Prisma 버전의 partial index 등 지원 여부는 도입 시점에 공식 문서로 확인하고, 지원되더라도 계약 테스트는 유지한다.
 - **스키마 계약 테스트(CI 필수)**: 빈 PostgreSQL에 `migrate deploy` 후 `pg_indexes`/`pg_constraint`를 조회해 §13.3·§14의 필수 제약이 모두 존재하는지 검사한다(TEST MIG-*).
 - 공유 환경(staging/production)에서는 `migrate deploy`만 사용하고 `db push`를 금지한다.
+- **Prisma CLI 환경 가드** [채택 A-042]: `prisma.config.ts`가 설정을 읽는 시점(모든 CLI 명령 실행 전)에 `DATABASE_URL`이 있으면 `NAZIR_RUNTIME_ENV`와 DB 이름이 일치하는지 검사한다(`src/server/config/prisma-cli-guard.ts`). `test`는 `_test` DB만, 그 외 환경(`local`·`staging`·`production`)은 `_test` DB를 거부하며, `NAZIR_RUNTIME_ENV` 누락·미지의 값은 `production`으로 간주한다. `DATABASE_URL`이 없으면 검사하지 않아 `prisma validate`·`prisma generate`는 그대로 동작한다. `SHADOW_DATABASE_URL`은 검사 없이 그대로 전달한다. 거부는 명령이 시작되기 전이라 DB는 변경되지 않는다(테스트 `cli-guard.test.ts`가 실제 `migrate deploy`·`migrate reset`으로 확인). 로컬 개발은 `.env.local`에 `NAZIR_RUNTIME_ENV=local`이 있어야 한다(`.env.example`).
 - **모든 migration은 `BEGIN; … COMMIT;`으로 감싼다** [채택 A-037, S1]. Prisma Migrate는 migration을 트랜잭션으로 실행하지 않아(7.10.1 실측) 중간에 실패하면 앞 문장이 DB에 남고 이후 배포가 막힌다(P3009). `migrate dev --create-only`가 만든 SQL에도 직접 감싼다. 트랜잭션 안에서 실행할 수 없는 문장(`CREATE INDEX CONCURRENTLY` 등)은 별도 migration으로 분리하고 파일 맨 위에 `-- no-transaction: <사유>`를 둔다(트랜잭션 제어 문장 없이, 문장 1개). 테스트 MIG-09(정적), MIG-10(실패 주입)이 이를 강제한다. 실패 시 복구는 §19.9.
 - 행 잠금(`FOR UPDATE`, `SKIP LOCKED`)은 Prisma Client API로 표현되지 않으므로 parameterized raw query로 작성한다. 문자열 연결 SQL 금지.
 - unique 위반(PostgreSQL 23505 / Prisma P2002)은 제약 이름별로 도메인 오류(409 `SEAT_UNAVAILABLE`, `ACTIVE_ORDER_EXISTS` 등)로 변환한다. CHECK 위반(23514)도 제약 이름별로 변환한다.
@@ -1332,6 +1355,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.3 | 2026-11-17 | Step 2 PR 전 마지막 검토 반영: `payments` DELETE 차단 트리거와 `SUCCEEDED` 승인 금액 CHECK 추가(A-038, §7.1·§13.3·§14·§19). 결제수단 요청값·원문 보존(Q-027), 인증 세션 상태·바인딩 검증(Q-028), 원장성 테이블 보호 범위(Q-029)는 선택지·추천안만 기록(미구현). A-001~A-037, D-001~D-015는 변경 없음 |
 | 1.2.4 | 2026-11-17 | Step 2 후속(사용자 지시): `SUCCEEDED` ⇒ `approved_at` CHECK(A-038 보강), 결제수단 요청값 `requested_method_type`(불변)·PG 원문 `provider_method_raw`(A-039, Q-027 채택안 ①), 인증 세션 4열 복합 FK + 지연 constraint trigger 2개(A-040, Q-028), 원장성 테이블 4개 보호(`admin_audit_logs`·`payment_status_logs`·`refund_items` UPDATE+DELETE, `refunds` DELETE; A-041, Q-029 한정 범위). §6.2·§6.3·§7.1·§7.3~§7.5·§9.3·§13.3·§14·§19 갱신. A-001~A-037, D-001~D-015는 변경 없음 |
 | 1.2.5 | 2026-11-18 | Step 2 최종 보완: CHECK `payments_unapproved_method_matches_request_ck`(`status = 'SUCCEEDED' OR method_type = requested_method_type`) 추가(A-039 보강, §7.1·§13.3·§14·§19). 기존 제약·A-039 구조는 변경 없음. A-001~A-037, D-001~D-015 변경 없음 |
+| 1.2.6 | 2026-11-18 | PR #2 기술 리뷰 후속(A-042): `SUCCEEDED` 결제의 승인 증거 불변 트리거(§7.1 컬럼 분류표), `refunds` 핵심 필드 불변 트리거와 `SEAT` 환불 합계 지연 constraint trigger 2개(§7.4), Prisma CLI 환경 가드(§14.1). §7.5·§13.3·§14·§19 갱신, §19.8의 "승인 후 UPDATE 가능" 서술 정정. A-041의 refunds UPDATE 허용과 A-001~A-037, D-001~D-015는 변경 없음 |
 
 ---
 
@@ -1348,8 +1372,8 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | CHECK | 55개(상태값 31 + 금액·한도·소유·수단·승인 금액·승인 시각·원문·수단 일치 24) |
 | UNIQUE | 38개(PK·partial 제외). 그중 `seats` 1개는 `NULLS NOT DISTINCT` |
 | partial unique | 6개: 좌석 live hold, 활성 주문, 진행 중 결제, **`PRIMARY` 결제**, 유효 티켓, open review case |
-| 트리거 | 15개: 행 단위 **11개**(`order_items` UPDATE·DELETE 2, `payments` DELETE 1, `payments.requested_method_type` 불변 1, `admin_audit_logs`·`payment_status_logs`·`refund_items` 각 UPDATE·DELETE 6, `refunds` DELETE 1) + **지연 constraint trigger 4개**(주문↔결제 2, 인증 세션↔인증 2) |
-| 함수 | 9개: 트리거 함수(`order_items_reject_change`, `ledger_reject_delete`, `ledger_reject_update`, `payments_reject_requested_method_change`, `orders_check_confirmed_payment`, `payments_check_primary_confirmed`, `identity_assert_claim_consistent`, `identity_sessions_check_claimed`, `identity_verifications_check_consumed`) |
+| 트리거 | 19개: 행 단위 **13개**(`order_items` UPDATE·DELETE 2, `payments` DELETE 1, `payments.requested_method_type` 불변 1, **`payments` 승인 증거 불변 1**, `admin_audit_logs`·`payment_status_logs`·`refund_items` 각 UPDATE·DELETE 6, `refunds` DELETE 1, **`refunds` 핵심 불변 1**) + **지연 constraint trigger 6개**(주문↔결제 2, 인증 세션↔인증 2, **`SEAT` 환불 합계 2**) |
+| 함수 | 14개: 트리거 함수 — 기존 9개(`order_items_reject_change`, `ledger_reject_delete`, `ledger_reject_update`, `payments_reject_requested_method_change`, `orders_check_confirmed_payment`, `payments_check_primary_confirmed`, `identity_assert_claim_consistent`, `identity_sessions_check_claimed`, `identity_verifications_check_consumed`) + 신규 5개(`payments_reject_approved_evidence_change`, `refunds_reject_core_change`, `refunds_assert_items_consistent`, `refunds_check_items`, `refund_items_check_refund`) |
 | `payments` 컬럼 | 31개(후속 작업으로 `requested_method_type`·`provider_method_raw` 추가) |
 | 인덱스 총수 | 98개(PK 27개 + Prisma 관리 테이블 `_prisma_migrations` PK 1개 포함) |
 
@@ -1359,9 +1383,10 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 |---|---|
 | `prisma/schema.prisma` | 27개 모델. 모든 FK(복합 FK 포함)·일반 unique·index 선언 |
 | `prisma/migrations/20261116140000_init_schema/migration.sql` | **Prisma 생성 SQL**(`migrate diff --from-empty --to-schema`)에 **수기 수정 세 곳만**: ① `CREATE SCHEMA IF NOT EXISTS "public"` 제거, ② `seats_venue_section_row_number_nnd_uq`를 `NULLS NOT DISTINCT`로 교체, ③ 전체를 `BEGIN; … COMMIT;`으로 래핑(S1) |
-| `prisma/migrations/20261116140100_integrity_constraints/migration.sql` | **수기 raw SQL**(`BEGIN; … COMMIT;`): partial unique 6개, CHECK 55개, 행 트리거 11개(`order_items`·`payments`·원장성 4개 테이블), 지연 constraint trigger 4개(주문↔결제 2, 인증 claim 2), 함수 9개 |
+| `prisma/migrations/20261116140100_integrity_constraints/migration.sql` | **수기 raw SQL**(`BEGIN; … COMMIT;`): partial unique 6개, CHECK 55개, 행 트리거 13개(`order_items`·`payments`·원장성 4개 테이블), 지연 constraint trigger 6개(주문↔결제 2, 인증 claim 2, `SEAT` 환불 합계 2), 함수 14개 |
 | `prisma/migrations/migration_lock.toml` | `provider = "postgresql"` |
-| `prisma.config.ts` | Prisma 7 CLI 설정(`.env.local`→`.env` 로드, `DATABASE_URL`, `SHADOW_DATABASE_URL`, seed 명령) |
+| `prisma.config.ts` | Prisma 7 CLI 설정(`.env.local`→`.env` 로드, `DATABASE_URL`, `SHADOW_DATABASE_URL`, seed 명령) + **명령 실행 전 DB·환경 가드**(A-042) |
+| `src/server/config/prisma-cli-guard.ts` | Prisma CLI 환경 가드(순수 함수, `prisma.config.ts`가 호출). `DATABASE_URL`이 있으면 `NAZIR_RUNTIME_ENV`와 DB 이름 일치를 검사 |
 | `prisma/seed.ts` | 개발·테스트 전용 임시 seed(§19.9) |
 | `src/server/db/constants.ts` | 상태값·제약 이름 상수(DB CHECK와 1:1, 테스트 MIG-03b·DB_CONSTRAINT 검증이 대조) |
 | `src/server/db/payment-method.ts` | 결제수단 요청값·PG 원문의 저장 규칙(순수 함수). DB CHECK와 같은 규칙을 서비스가 먼저 적용해 오류 대신 도메인 판단을 하게 한다(A-039). 결제 서비스 자체는 Step 6 |
@@ -1400,19 +1425,20 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | A-039 | 결제수단 요청값 보존·불변, `OTHER`는 PG 원문 필수 | `payments.requested_method_type`(NOT NULL), `payments_requested_method_type_ck`, `payments_other_requires_raw_ck`, `payments_provider_method_raw_ck`, `payments_unapproved_method_matches_request_ck`, 트리거 `payments_requested_method_no_change` | `ledger-claims` A-039 (MIG-19, 미승인 결제의 수단 일치 포함), `tests/unit/payment-method.test.ts` |
 | A-040 | 인증 세션 = 원 인증의 주체·용도·브라우저 바인딩, 세션 ⇔ `CONSUMED` 인증 | 4열 복합 FK `identity_sessions_verification_claim_fk`, 지연 constraint trigger `identity_sessions_claim_guard`·`identity_verifications_claim_guard` | `ledger-claims` A-040 (MIG-20) |
 | A-041 | 감사·결제 상태 로그·환불 항목 추가 전용, 환불 행 삭제 불가 | 트리거 `admin_audit_logs_no_update/no_delete`, `payment_status_logs_no_update/no_delete`, `refund_items_no_update/no_delete`, `refunds_no_delete` | `ledger-claims` A-041 (MIG-21) |
+| A-042 | `SUCCEEDED` 결제의 승인 증거 불변, 환불 핵심 필드 불변, `SEAT` 환불 총액 = 항목 합계(COMMIT), Prisma CLI 환경 가드 | 트리거 `payments_approved_evidence_no_change`(→ `payments_reject_approved_evidence_change()`), 트리거 `refunds_core_no_change`(→ `refunds_reject_core_change()`), 지연 trigger `refunds_items_guard`·`refund_items_refund_guard`(→ `refunds_assert_items_consistent()`), `prisma.config.ts` → `prisma-cli-guard.ts` | `ledger-evidence` (MIG-22·MIG-23), `cli-guard`·`prisma-cli-guard` 단위 (MIG-24) |
 | S4 | 주문은 자기 쿼터 행 필요 | `orders_quota_fk`(복합 → `purchase_quotas`) | `consistency` S4 |
 | Q-022 | 승인된 허용 외 결제 기록 | `payments_method_type_ck`(`OTHER` 추가), `payments_method_type_other_ck` | `consistency` Q-022 |
 | Q-024 | 인증 세션 = 원 인증의 주체·용도 → **A-040으로 확장**(바인딩 포함) | `identity_sessions_verification_claim_fk` | `consistency` Q-024, `ledger-claims` A-040 |
 | S1 | migration 원자성 | 모든 migration `BEGIN; … COMMIT;` | `migration-safety` MIG-09·MIG-10 |
 
-TEST_PLAN 대응: `migrations.test.ts`(MIG-01~04, 06, 07, DRIFT-01, DB_CONSTRAINT 이름 검증), `integrity.test.ts`(MIG-05 동작, MIG-08, 규칙 1~14), `consistency.test.ts`(S3·S4·Q-022·Q-023·Q-024), `ledger-claims.test.ts`(A-038·A-039·A-040·A-041, MIG-17~MIG-21), `migration-safety.test.ts`(MIG-09·MIG-10), `client.test.ts`(DB-01·DB-02), `seed.test.ts`(SEED-01~04). 검사 함수가 **공허하지 않음**은 두 가지로 확인했다: ① 일부러 망가뜨린 DB에서 검사기가 위반을 검출(음성 대조군), ② 보완 구현 중 보호 장치 11개(PRIMARY unique, 지연 trigger 2개, 지연 해제, CHECK 2개, DELETE 트리거, 3개 FK, 트랜잭션 래퍼)를 하나씩 제거해 매번 해당 영역 테스트가 실패함을 확인했고, 후속 작업에서 새 제약·트리거 17개(승인 시각 CHECK, 요청 수단 CHECK·불변 트리거, `OTHER` 원문 CHECK, 원문 안전 CHECK, 4열 FK, 지연 트리거 2개, 원장 보호 트리거 7개 등)를 migration에서 하나씩 제거·약화해 전부 검출됨을 확인했다. 이후 추가한 CHECK `payments_unapproved_method_matches_request_ck`도 제거·`TRUE`·부분 완화·과도한 강화 6가지 변형이 모두 검출됐다(TEST_PLAN §2.1.1). 보완 이후 `rolledBack`(롤백 트랜잭션)은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 조용히 통과하지 못한다.
+TEST_PLAN 대응: `migrations.test.ts`(MIG-01~04, 06, 07, DRIFT-01, DB_CONSTRAINT 이름 검증), `integrity.test.ts`(MIG-05 동작, MIG-08, 규칙 1~14), `consistency.test.ts`(S3·S4·Q-022·Q-023·Q-024), `ledger-claims.test.ts`(A-038·A-039·A-040·A-041, MIG-17~MIG-21), `ledger-evidence.test.ts`(A-042: MIG-22·MIG-23), `cli-guard.test.ts`(A-042: MIG-24), `migration-safety.test.ts`(MIG-09·MIG-10), `client.test.ts`(DB-01·DB-02), `seed.test.ts`(SEED-01~04). 검사 함수가 **공허하지 않음**은 두 가지로 확인했다: ① 일부러 망가뜨린 DB에서 검사기가 위반을 검출(음성 대조군), ② 보완 구현 중 보호 장치 11개(PRIMARY unique, 지연 trigger 2개, 지연 해제, CHECK 2개, DELETE 트리거, 3개 FK, 트랜잭션 래퍼)를 하나씩 제거해 매번 해당 영역 테스트가 실패함을 확인했고, 후속 작업에서 새 제약·트리거 17개(승인 시각 CHECK, 요청 수단 CHECK·불변 트리거, `OTHER` 원문 CHECK, 원문 안전 CHECK, 4열 FK, 지연 트리거 2개, 원장 보호 트리거 7개 등)를 migration에서 하나씩 제거·약화해 전부 검출됨을 확인했다. 이후 추가한 CHECK `payments_unapproved_method_matches_request_ck`도 제거·`TRUE`·부분 완화·과도한 강화 6가지 변형이 모두 검출됐다(TEST_PLAN §2.1.1). 보완 이후 `rolledBack`(롤백 트랜잭션)은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 조용히 통과하지 못한다.
 
 ### 19.4 raw SQL로 구현한 객체 (`..._integrity_constraints`)
 
 - **partial unique index (6)**: `seat_holds_active_seat_uq`, `orders_active_subject_session_uq`, `payments_in_progress_order_uq`, `payments_primary_order_uq`, `tickets_valid_seat_uq`, `review_cases_open_dedupe_uq`
 - **CHECK (55)**: 이름 규칙 `<table>_<column>_ck`. 상태값 31개는 `src/server/db/constants.ts`와 동일 어휘(테스트 MIG-03b), 나머지 24개는 금액·한도·소유·PAID·확인 보호 시각·수단(`OTHER`)·`PRIMARY` 금액·`SUCCEEDED` 승인 금액·승인 시각·요청 수단·`OTHER` 원문·원문 안전·미승인 결제의 수단 = 요청 수단. 전체 목록은 `tests/contract/schema/manifest.ts`의 `CHECKS`
-- **행 트리거(11)**: `order_items_reject_change()` + `order_items_no_update`/`order_items_no_delete`, `ledger_reject_delete()`·`ledger_reject_update()`(SQLSTATE `23001`, 원장성 테이블에 재사용) + `payments_no_delete`, `refunds_no_delete`, `refund_items_no_update`/`refund_items_no_delete`, `payment_status_logs_no_update`/`payment_status_logs_no_delete`, `admin_audit_logs_no_update`/`admin_audit_logs_no_delete`, `payments_reject_requested_method_change()` + `payments_requested_method_no_change`(BEFORE UPDATE OF `requested_method_type`, 값이 바뀔 때만).
-- **지연 constraint trigger(4)**: `orders_check_confirmed_payment()` + `orders_confirmed_payment_guard`(AFTER UPDATE OF `confirmed_payment_id`), `payments_check_primary_confirmed()` + `payments_primary_guard`(AFTER INSERT/UPDATE OF `role`, `status`, `order_id`), `identity_assert_claim_consistent(vid)` 공통 판정 + `identity_sessions_check_claimed()` + `identity_sessions_claim_guard`(AFTER INSERT/UPDATE OF `identity_verification_id`/DELETE), `identity_verifications_check_consumed()` + `identity_verifications_claim_guard`(AFTER INSERT/UPDATE OF `status`) — 모두 `DEFERRABLE INITIALLY DEFERRED`. 지연 행 이벤트는 문장 시점의 행 이미지를 담으므로 함수는 NEW/OLD가 아니라 **현재 행을 다시 읽어** 최종 상태를 판정한다. 읽기만 하고 행 잠금을 잡지 않는다.
+- **행 트리거(13)**: `order_items_reject_change()` + `order_items_no_update`/`order_items_no_delete`, `ledger_reject_delete()`·`ledger_reject_update()`(SQLSTATE `23001`, 원장성 테이블에 재사용) + `payments_no_delete`, `refunds_no_delete`, `refund_items_no_update`/`refund_items_no_delete`, `payment_status_logs_no_update`/`payment_status_logs_no_delete`, `admin_audit_logs_no_update`/`admin_audit_logs_no_delete`, `payments_reject_requested_method_change()` + `payments_requested_method_no_change`(BEFORE UPDATE OF `requested_method_type`, 값이 바뀔 때만), `payments_reject_approved_evidence_change()` + `payments_approved_evidence_no_change`(AFTER UPDATE, `WHEN OLD.status = 'SUCCEEDED'`), `refunds_reject_core_change()` + `refunds_core_no_change`(AFTER UPDATE). 두 트리거는 **AFTER**로 두어 CHECK·FK가 먼저 판정하게 했다(도메인 규칙 위반은 기존 제약 이름으로 계속 보고).
+- **지연 constraint trigger(6)**: `orders_check_confirmed_payment()` + `orders_confirmed_payment_guard`(AFTER UPDATE OF `confirmed_payment_id`), `payments_check_primary_confirmed()` + `payments_primary_guard`(AFTER INSERT/UPDATE OF `role`, `status`, `order_id`), `identity_assert_claim_consistent(vid)` 공통 판정 + `identity_sessions_check_claimed()` + `identity_sessions_claim_guard`(AFTER INSERT/UPDATE OF `identity_verification_id`/DELETE), `identity_verifications_check_consumed()` + `identity_verifications_claim_guard`(AFTER INSERT/UPDATE OF `status`) `refunds_check_items()` + `refunds_items_guard`(AFTER INSERT ON `refunds`), `refund_items_check_refund()` + `refund_items_refund_guard`(AFTER INSERT ON `refund_items`), 공통 판정 `refunds_assert_items_consistent(rid)`(`SEAT` 합계·항목 1건 이상, `PAYMENT_EXCESS` 항목 없음) — 모두 `DEFERRABLE INITIALLY DEFERRED`. 지연 행 이벤트는 문장 시점의 행 이미지를 담으므로 함수는 NEW/OLD가 아니라 **현재 행을 다시 읽어** 최종 상태를 판정한다. 읽기만 하고 행 잠금을 잡지 않는다.
 - **`NULLS NOT DISTINCT`**: `init_schema`에서 수기 교체한 `seats_venue_section_row_number_nnd_uq`
 
 ### 19.5 Prisma schema와 SQL migration의 차이, 실측한 Prisma 동작
@@ -1465,7 +1491,8 @@ D1~D8은 §19 초안에서 구현자가 고른 사항이었고, 사용자가 아
 | A-038 | **구현 + 보강(2026-11-17)** — `payments` DELETE 차단, `SUCCEEDED`의 승인 금액·승인 시각 필수 | §7.1, `payments_no_delete`, `payments_succeeded_amount_ck`, `payments_succeeded_approved_at_ck` |
 | Q-027 | **해결(채택안 ① 2026-11-17)** — 요청 수단은 `requested_method_type`(불변), PG 원문은 `provider_method_raw`(A-039). 요청 간편결제사·응답 JSON 스냅샷은 저장하지 않음 | §7.1, `payments_requested_method_type_ck`, `payments_other_requires_raw_ck`, `payments_provider_method_raw_ck`, `payments_unapproved_method_matches_request_ck`, `payments_requested_method_no_change` |
 | Q-028 | **해결(2026-11-17)** — 4열 복합 FK + 지연 constraint trigger 2개(A-040). 보존·삭제 영향은 §6.3에 기록, 보존 정책은 변경 없음(Q-016) | §6.2·§6.3, `identity_sessions_verification_claim_fk`, `identity_sessions_claim_guard`, `identity_verifications_claim_guard` |
-| Q-029 | **한정 범위로 해결(2026-11-17)** — `admin_audit_logs`·`payment_status_logs`·`refund_items`는 UPDATE+DELETE 차단, `refunds`는 DELETE만 차단(A-041). `tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`는 이번에 다루지 않음 | §7.3~§7.5·§9.3, 트리거 7개 |
+| Q-029 | **한정 범위로 해결(2026-11-17)** — `admin_audit_logs`·`payment_status_logs`·`refund_items`는 UPDATE+DELETE 차단, `refunds`는 DELETE만 차단(A-041). (후속 A-042: `refunds` 핵심 필드 불변 + `SEAT` 합계 추가, UPDATE 허용은 유지) `tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`는 이번에 다루지 않음 | §7.3~§7.5·§9.3, 트리거 7개 |
+| A-042 | **구현(PR #2 기술 리뷰 후속, 2026-11-18)** — 승인 증거 불변, 환불 핵심 불변·`SEAT` 합계, Prisma CLI 환경 가드 | §7.1·§7.4·§14.1, 트리거 4개(행 2·지연 2), `prisma-cli-guard.ts` |
 
 후속 Step으로 이월한 항목(S2·S5·S7·S8·S9·S10)은 `IMPLEMENTATION_PLAN.md` §4.1과 `TEST_PLAN.md` §2.2에 있다.
 
@@ -1474,12 +1501,12 @@ D1~D8은 §19 초안에서 구현자가 고른 사항이었고, 사용자가 아
 - **상태 전이 유효성**(§12): CHECK는 어휘만 검사한다. 정의되지 않은 전이는 서비스가 거부해야 한다.
 - **전역 잠금 순서**(§13.2: quota → orders → payments → refunds → session_seats(id 순) → seat_holds → tickets)와 READ COMMITTED 명시는 DB로 강제할 수 없다. 각 잠금 대상은 PK 또는 unique로 단건 조회된다. 이제 `orders`가 쿼터 행을 FK로 참조하므로 **쿼터 행을 먼저 확보하지 않으면 주문 INSERT가 실패**한다(§11.2 1단계와 일치).
 - **지연 constraint trigger의 오류는 COMMIT에서 나온다.** Prisma interactive transaction이면 `$transaction`의 커밋 단계에서 실패하므로, 서비스는 판매 확정·관리자 복구 트랜잭션의 커밋 실패를 재시도·도메인 오류로 처리해야 한다(SQLSTATE `23514` + 제약 이름 `DB_CONSTRAINT.confirmedPayment*`/`primaryPayment*`).
-- `refund_items.amount ≤ order_items.price`, `refunds.total_amount = SUM(refund_items.amount)`, 항목당 환불 1건(§7.5)은 교차 행 규칙이라 환불 트랜잭션이 검증한다.
+- `refund_items.amount ≤ order_items.price`와 항목당 환불 1건(§7.5)은 교차 행 규칙이라 환불 트랜잭션이 검증한다. `refunds.total_amount = SUM(refund_items.amount)`(`SEAT`)와 `PAYMENT_EXCESS` 항목 없음은 DB가 COMMIT에서 검사한다(A-042) — 환불 서비스는 커밋 실패(`23514`, `refunds_seat_items_total_ck`)를 도메인 오류로 변환해야 한다.
 - `orders.total_amount = SUM(order_items.price)`와 항목 수 1~`max_seats_per_identity`는 DB가 검사하지 않는다. 결제 금액 보장(S3)은 `total_amount`가 올바르다는 전제 위에 있으므로 주문 생성 트랜잭션과 INV 테스트가 책임진다.
 - `purchase_quotas.counted_seats`가 §5.7 규칙의 파생값과 일치하는지(`QUOTA_MISMATCH` 감시)는 정기 검사.
 - **좌석 SOLD ↔ live hold, 종료 주문의 hold, 미판매 좌석의 티켓**의 교차 정합성(S2·S5)은 DB가 막지 않는다(후속 Step).
 - **보호하지 않은 원장성 테이블**(A-041의 한정 범위): `tickets`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`는 아직 삭제·수정할 수 있고, `orders`는 삭제할 수 있다(자식 행이 없는 경우). 각각 보존 정책(Q-016)·운영 절차(상태 전이·재처리)와 얽혀 있어 이번 범위에서 제외했다. 결정은 해당 테이블의 서비스가 구현되는 Step에서 한다.
-- `EXCESS` 결제의 `approved_amount`와 `merchant_payment_ref` 등은 승인 후에도 UPDATE로 바꿀 수 있다(`PRIMARY`의 금액만 CHECK로 고정). 관리자 변경은 감사 로그(§9.3)와 서비스 규칙이 책임진다.
+- 승인 증거는 `SUCCEEDED` 이후 DB가 불변으로 지킨다(A-042). 따라서 **승인 값을 잘못 기록했을 때 UPDATE로 고칠 수 없다**: 승인 시 한 번에 올바른 값을 쓰는 것이 서비스의 의무이고, 정정은 별도 정정 절차(감사 로그 §9.3 + 관리자 전용 migration 권한)로만 한다. 이 절차는 Step 8에서 설계한다.
 - **인증 claim의 시간 정책**: `claim_expires_at`·`expires_at` 판단은 서비스가 Clock으로 한다. DB는 시간에 따른 상태 변경을 하지 않는다(지연 트리거는 상태 관계만 검사한다).
 - **원문 라벨의 의미 검증**: `provider_method_raw` CHECK는 9자리 이상 숫자·`@`·제어문자 같은 명백한 위험만 막는다. 라벨이 PG가 실제로 보낸 값인지, 마스킹이 충분한지는 adapter와 서비스 책임이다.
 - 만료 판정은 `orders.hold_expires_at`과 DB 시각(Clock). `seat_holds.expires_at`은 만들지 않았다.

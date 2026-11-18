@@ -560,8 +560,10 @@ describe("A-041 — append-only history and the refund ledger", () => {
       if (table === "admin_audit_logs") await insert(c, table, { admin_id: f.admin.id, action: "X", target_type: "orders" });
       if (table === "payment_status_logs") await insert(c, table, { payment_id: f.payment.id, to_status: "SUCCEEDED", source: "WEBHOOK" });
       if (table === "refund_items") {
+        // a further item belongs to a further SEAT refund of the same total (SUM(items) = total_amount is checked at COMMIT)
         const item2 = await mkOrderItem(c, { orderId: f.order.id, sessionId: f.w.s1.id, sessionSeatId: f.w.s1b.id });
-        await insert(c, table, { refund_id: f.refund.id, order_id: f.order.id, order_item_id: item2.id, amount: 100000 });
+        const refund2 = await mkRefund(c, { orderId: f.order.id, paymentId: f.payment.id }, { total_amount: 100000 });
+        await insert(c, table, { refund_id: refund2.id, order_id: f.order.id, order_item_id: item2.id, amount: 100000 });
       }
     }),
   );
@@ -577,6 +579,7 @@ describe("A-041 — append-only history and the refund ledger", () => {
       await update(c, "refunds", f.refund.id, { status: "VERIFYING" });
       await update(c, "refunds", f.refund.id, { status: "COMPLETED", verified_at: new Date(), completed_at: new Date() });
       const second = await mkRefund(c, { orderId: f.order.id, paymentId: f.payment.id }, { total_amount: 1 });
+      await insert(c, "refund_items", { refund_id: second.id, order_id: f.order.id, order_item_id: f.item.id, amount: 1 }); // SUM(items) = total_amount
       await update(c, "refunds", second.id, { status: "WITHDRAWN" });
       expect(await count(c, "refunds", f.refund.id)).toBe(1);
     }));

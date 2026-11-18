@@ -12,10 +12,10 @@ beforeEach(async () => {
 });
 afterEach(() => destroyTestDb(db));
 
-const seed = (env: Record<string, string>) => runPrisma(["db", "seed"], { databaseUrl: db.url, env });
+const seed = (env: Record<string, string>, target: TestDb = db) => runPrisma(["db", "seed"], { databaseUrl: target.url, env });
 
-async function counts() {
-  const { rows } = await db.query<Record<string, string>>(`
+async function counts(target: TestDb = db) {
+  const { rows } = await target.query<Record<string, string>>(`
     SELECT (SELECT count(*) FROM venues) AS venues, (SELECT count(*) FROM shows) AS shows,
            (SELECT count(*) FROM show_sessions) AS sessions, (SELECT count(*) FROM seats) AS seats,
            (SELECT count(*) FROM session_seats) AS session_seats`);
@@ -58,11 +58,28 @@ describe("seed", () => {
     ["unknown value", "prod"],
     ["staging", "staging"],
   ])("SEED-03 refuses to run with %s and writes nothing", async (_label, value) => {
-    const res = await seed({ NAZIR_RUNTIME_ENV: value });
-    expect(res.code).not.toBe(0);
-    expect(res.stdout + res.stderr).toMatch(/only runs with NAZIR_RUNTIME_ENV=local or test/);
-    expect(await counts()).toEqual({ venues: 0, shows: 0, sessions: 0, seats: 0, session_seats: 0 });
+    // A database that is not a *_test database: the Prisma CLI's own environment guard (prisma.config.ts) lets these
+    // combinations through, so the seed guard's environment rule is what refuses them.
+    const dev = await cloneTestDb(server, inject("templateDb"), "dev");
+    try {
+      const res = await seed({ NAZIR_RUNTIME_ENV: value }, dev);
+      expect(res.code).not.toBe(0);
+      expect(res.stdout + res.stderr).toMatch(/only runs with NAZIR_RUNTIME_ENV=local or test/);
+      expect(await counts(dev)).toEqual({ venues: 0, shows: 0, sessions: 0, seats: 0, session_seats: 0 });
+    } finally {
+      await destroyTestDb(dev);
+    }
   });
+
+  it.each(["production", "", "prod", "staging"])(
+    "SEED-03b a test database with NAZIR_RUNTIME_ENV=%j is refused as well (by the CLI guard, before the seed runs) and nothing is written",
+    async (value) => {
+      const res = await seed({ NAZIR_RUNTIME_ENV: value });
+      expect(res.code).not.toBe(0);
+      expect(res.stdout + res.stderr).toMatch(/must not be used with NAZIR_RUNTIME_ENV=(production|staging)/);
+      expect(await counts()).toEqual({ venues: 0, shows: 0, sessions: 0, seats: 0, session_seats: 0 });
+    },
+  );
 
   it("SEED-04 refuses a test database in a non-test environment (database/environment cross-check)", async () => {
     const res = await seed({ NAZIR_RUNTIME_ENV: "local" }); // throwaway DBs are *_test databases

@@ -308,7 +308,7 @@ export const NON_UUID_ID_COLUMNS = new Set([
 
 // ───────────────────────── trigger ─────────────────────────
 
-/** pg_trigger.tgtype bits: ROW(1) | BEFORE(2) | DELETE(8) | UPDATE(16) */
+/** pg_trigger.tgtype bits: ROW(1) | BEFORE(2) | DELETE(8) | UPDATE(16); an AFTER trigger has no BEFORE bit */
 export const IMMUTABLE_TRIGGERS = [
   { name: "order_items_no_update", table: "order_items", tgtype: 1 | 2 | 16, function: "order_items_reject_change" },
   { name: "order_items_no_delete", table: "order_items", tgtype: 1 | 2 | 8, function: "order_items_reject_change" },
@@ -322,6 +322,9 @@ export const IMMUTABLE_TRIGGERS = [
   { name: "refund_items_no_update", table: "refund_items", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
   { name: "refund_items_no_delete", table: "refund_items", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
   { name: "refunds_no_delete", table: "refunds", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  // PR #2 review: approval record of a SUCCEEDED payment, monetary core of a refund
+  { name: "payments_approved_evidence_no_change", table: "payments", tgtype: 1 | 16, function: "payments_reject_approved_evidence_change" },
+  { name: "refunds_core_no_change", table: "refunds", tgtype: 1 | 16, function: "refunds_reject_core_change" },
 ];
 
 /**
@@ -334,4 +337,7 @@ export const CONSTRAINT_TRIGGERS = [
   // A-040: identity claim consistency. tgtype: ROW(1) | INSERT(4) | DELETE(8) | UPDATE(16)
   { name: "identity_sessions_claim_guard", table: "identity_sessions", tgtype: 1 | 4 | 8 | 16, function: "identity_sessions_check_claimed" },
   { name: "identity_verifications_claim_guard", table: "identity_verifications", tgtype: 1 | 4 | 16, function: "identity_verifications_check_consumed" },
+  // PR #2 review: SEAT refund total = sum of its items (checked at COMMIT). tgtype: ROW(1) | INSERT(4)
+  { name: "refunds_items_guard", table: "refunds", tgtype: 1 | 4, function: "refunds_check_items" },
+  { name: "refund_items_refund_guard", table: "refund_items", tgtype: 1 | 4, function: "refund_items_check_refund" },
 ];

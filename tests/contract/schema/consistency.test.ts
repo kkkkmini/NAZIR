@@ -146,8 +146,11 @@ describe("S3 — order <-> payment consistency", () => {
         await checkAtCommit(c);
         const bad = { code: PG.checkViolation, constraint: DB_CONSTRAINT.confirmedPaymentDemoted };
         await expectCommitError(c, () => update(c, "payments", p.id, { role: "EXCESS" }), bad);
-        await expectCommitError(c, () => update(c, "payments", p.id, { status: "FAILED", role: null }), bad);
-        await expectCommitError(c, () => update(c, "payments", p.id, { status: "CANCELED", role: null }), bad);
+        // Leaving SUCCEEDED is refused right away since the approval record became immutable (payments_approved_evidence_no_change,
+        // PR #2 review); before that it was only caught by the deferred trigger at COMMIT.
+        const evidence = { code: PG.restrictViolation, constraint: DB_CONSTRAINT.approvedPaymentEvidenceImmutable };
+        await expectDbError(c, `UPDATE payments SET status = 'FAILED', role = NULL WHERE id = $1`, [p.id], evidence);
+        await expectDbError(c, `UPDATE payments SET status = 'CANCELED', role = NULL WHERE id = $1`, [p.id], evidence);
       }));
 
     it("re-pointing the order at a non-PRIMARY payment, or detaching it while the payment stays PRIMARY", () =>

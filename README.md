@@ -30,7 +30,7 @@ npm run db:migrate:deploy               # migration 적용. 공유 환경에서�
 npm run db:seed                         # 임시 개발 데이터(local/test 환경에서만 실행)
 ```
 
-- **개발 DB와 테스트 DB는 이름으로 분리한다.** 이름이 `_test`로 끝나는 DB는 `NAZIR_RUNTIME_ENV=test`에서만 쓸 수 있고, 반대로 `test` 환경은 `_test` DB만 쓸 수 있다. 서버 기동·seed가 위반 시 거부한다.
+- **개발 DB와 테스트 DB는 이름으로 분리한다.** 이름이 `_test`로 끝나는 DB는 `NAZIR_RUNTIME_ENV=test`에서만 쓸 수 있고, 반대로 `test` 환경은 `_test` DB만 쓸 수 있다. 서버 기동·seed가 위반 시 거부하고, **Prisma CLI도 `prisma.config.ts`에서 명령 실행 전에 같은 규칙을 검사한다**(`DATABASE_URL`이 있을 때만. `NAZIR_RUNTIME_ENV`가 없으면 production으로 간주되어 `_test` DB가 거부되므로 `.env.local`에 `NAZIR_RUNTIME_ENV=local`을 둔다).
 - **`prisma db push`와 `prisma migrate reset`을 공유 환경에서 쓰지 않는다.** 새 migration은 `prisma migrate dev --create-only`로 만들고 SQL을 직접 검토한다(raw SQL 객체 DROP 금지 MIG-06, **파일 전체를 `BEGIN; … COMMIT;`으로 감쌈** MIG-09). 실패 시 복구 절차는 `docs/DATABASE.md` §19.9.
 - seed는 `[DEV SEED]` 임시 공연·좌석·가격이다. 실제 운영 데이터가 아니며 `NAZIR_RUNTIME_ENV`가 없거나 `local`·`test`가 아니면 실행을 거부한다.
 

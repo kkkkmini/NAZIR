@@ -123,6 +123,12 @@ export const DB_CONSTRAINT = {
   providerMethodRawCheck: "payments_provider_method_raw_ck",
   /** CHECK: until SUCCEEDED, method_type equals the requested method (A-039). */
   unapprovedMethodMatchesRequestCheck: "payments_unapproved_method_matches_request_ck",
+  /** Row triggers (SQLSTATE 23001): the approval record of a SUCCEEDED payment / the core of a refund never change. */
+  approvedPaymentEvidenceImmutable: "payments_approved_evidence_immutable",
+  refundCoreImmutable: "refunds_core_immutable",
+  /** Deferred trigger errors (COMMIT, 23514): a SEAT refund's total = sum of its items; a PAYMENT_EXCESS refund has none. */
+  refundSeatItemsTotal: "refunds_seat_items_total_ck",
+  refundExcessNoItems: "refunds_excess_no_items_ck",
   /** Deferred constraint-trigger errors (raised at COMMIT with SQLSTATE 23514). */
   confirmedPaymentNotPrimary: "orders_confirmed_payment_primary_ck",
   confirmedPaymentDetached: "orders_confirmed_payment_detach_ck",

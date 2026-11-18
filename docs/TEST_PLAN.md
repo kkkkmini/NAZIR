@@ -60,6 +60,9 @@
 | MIG-19 | 결제수단 요청값·원문(Q-027, A-039): 생성 시 `requested_method_type` 기록, 요청값 변경(`CARD`↔`EASY_PAY`, `OTHER`로 변경, `NULL`) 거부, `CARD→CARD`·`EASY_PAY→EASY_PAY` 승인, `CARD→OTHER`·`EASY_PAY→OTHER`(`method_type`만 변경, 요청값 유지) 허용, `OTHER`+원문 NULL 거부, 원문 위험 값(공백·9자리 이상 숫자·`@`·제어문자) 거부, 원문은 정규화 없이 그대로 저장, 요청값을 건드리지 않는 일반 UPDATE 허용, 승인 UPDATE 후에도 요청값 유지(서비스 순수 함수 `paymentApprovalMethodColumns`와 DB가 함께) **(보강 2026-11-18)** 미승인 결제(`READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`)의 `method_type` ≠ 요청값은 INSERT·UPDATE(단독·벌크·상태 전이 동시) 모두 거부, 일치하는 생성·전이는 허용, `SUCCEEDED`는 `CARD→CARD`/`CARD→EASY_PAY`/`CARD→OTHER`/`EASY_PAY→OTHER` 등 PG 결과대로 허용(EXCESS·PRIMARY 모두), 불일치 승인 결제를 미승인 상태로 되돌리는 UPDATE 거부 | 요청값은 생성 후 불변, `OTHER`는 원문 필수, **미승인 결제의 `method_type`은 요청값과 같다(`SUCCEEDED`에서만 다를 수 있음)**, 나머지 전이는 기존 규칙대로 허용 |
 | MIG-20 | 인증 세션 무결성(Q-028, A-040): `PENDING`·`FAILED`·`EXPIRED` 인증의 세션 거부(COMMIT), `VERIFIED`로 남은 인증의 세션 거부, 세션 없는 `CONSUMED` 거부, 다른 바인딩 세션 거부(FK), 세션 있는 `CONSUMED`를 `VERIFIED`/`PENDING`/`FAILED`로 되돌리기 거부, **claim 두 가지 문장 순서(세션 먼저·상태 먼저) 모두 허용**, `REVOKED`/`EXPIRED` 세션 허용, `PENDING`→`FAILED`→`EXPIRED` 정상 전이 허용, 보존·삭제 시나리오(세션→인증 순서 동시 삭제 허용, 세션만 삭제 거부, 인증만 삭제 FK 거부, 주문이 참조하는 세션 삭제 RESTRICT, 개인정보 컬럼 UPDATE 허용, `PENDING`/`FAILED`/`EXPIRED` 인증 삭제 허용) | 지연 trigger가 COMMIT에서 판정, 정상 claim은 막지 않음 |
 | MIG-21 | 원장성 테이블 보호(Q-029, A-041): `admin_audit_logs`·`payment_status_logs`·`refund_items`의 UPDATE·DELETE(개별·벌크·**실제 COMMIT**) 거부, `refunds` DELETE 거부·UPDATE(상태 전이) 허용, **범위 밖**(`tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`)은 차단되지 않음을 명시적으로 확인 | 차단 대상은 SQLSTATE `23001`, 범위 밖 테이블은 기존 동작 유지 |
+| MIG-22 | 승인 증거 불변(PR #2 P1, A-042): `SUCCEEDED` 결제(`PRIMARY`·`EXCESS`)의 `approved_amount`·`approved_at`·`method_type`·`provider_method_raw`(값→다른 값·값→NULL)·`easy_pay_provider`·`card_company`·`merchant_payment_ref`·`provider_payment_id`·`pg_transaction_id`·`provider`·`currency`·`order_id`·`status`(`FAILED`/`CANCELED`/`READY`/`CONFIRMING`/`UNKNOWN` 강등, 승인 값 지우기 동반 포함) UPDATE 거부(단건·벌크·실제 COMMIT), 거부 후 행 불변. 허용: `refunded_amount`(전액 환불까지)·`last_verified_at`·`requery_count`·`next_requery_at`·`unknown_since`·`confirm_started_at`·`failure_*`·`updated_at`·값이 같은 쓰기, `READY`/`CONFIRMING`/`UNKNOWN` → `SUCCEEDED` 전이(모든 증거를 한 UPDATE로 기록), `SUCCEEDED` 이전 결제의 모든 컬럼 UPDATE, `PRIMARY` ⇔ 주문 일관성(`checkAtCommit`) | 증거는 SQLSTATE `23001`(`payments_approved_evidence_immutable`)로 거부, 운영 컬럼 UPDATE는 허용 |
+| MIG-23 | 환불 핵심 불변과 `SEAT` 합계(PR #2 P1, A-042): `total_amount`·`refund_type`·`provider`·`payment_id`·`order_id`(+`payment_id`)·`requested_by_admin_id`(NULL→값·값→값·값→NULL)·`created_at`·`id` UPDATE 거부(단건·벌크·실제 COMMIT), `order_id` 단독 변경은 복합 FK가 먼저 판정. 허용: 상태 전이 전체(`REQUESTED`→`VERIFYING`→`FAILED`→`VERIFYING`→`COMPLETED`, `WITHDRAWN`)와 `provider_refund_id`·`pg_executed_by_admin_id`·`verified_at`·`completed_at`·`failure_reason`·`reason`·`updated_at`·값이 같은 쓰기, 완료 후에도 핵심 불변. `SEAT` 환불: 항목 합계 = 총액(항목 1개·여러 개·환불 후 항목 INSERT) 허용, 항목 없음·합계 부족·합계 초과·커밋된 환불에 항목 추가는 **COMMIT에서** 거부(`refunds_seat_items_total_ck`), `PAYMENT_EXCESS`는 항목 없을 때만 허용(`refunds_excess_no_items_ck`), 실제 COMMIT 실패 시 환불·항목이 남지 않음 | 핵심 변경은 `23001`(`refunds_core_immutable`), 합계 위반은 COMMIT에서 `23514` |
+| MIG-24 | Prisma CLI 환경 가드(PR #2 P2, A-042): 실제 `prisma validate`로 환경×DB 10가지(local+dev 허용, test+test 허용, test+dev 거부, local/staging/production+test 거부, 누락·미지 값은 production 취급, production+dev 허용), `DATABASE_URL` 없이 `validate` 동작, 거부된 `migrate deploy`·`migrate reset`이 **시작 전에** 종료되고 DB에 테이블이 생기지 않으며 기존 데이터가 남음, 허용 조합의 `migrate deploy` 정상, `SHADOW_DATABASE_URL`을 쓰는 `migrate diff` 정상. 단위 테스트(DB 불필요)가 같은 규칙과 비밀번호 비노출을 확인 | 거부는 명령 실행 전, DB 불변 |
 
 **Step 2 구현 상태 (2026-11-16):** MIG-01~16 구현·통과. 실행: `TEST_DATABASE_URL=postgresql://… npm run test:db` (실제 PostgreSQL 15+ 필수, 미설정 시 건너뛰지 않고 실패). CI는 `.github/workflows/ci.yml`의 `db` job(`postgres:16` 서비스 컨테이너). 파일과 범위:
 
@@ -70,9 +73,12 @@
 | `tests/contract/schema/integrity.test.ts` | MIG-05(동작), MIG-08, 규칙 1~14의 동작 증명(SQLSTATE·제약 이름 단언), 실제 2커넥션 동시 INSERT, QTA-18·QTA-19·ORD-17 중 DB 수준 부분 |
 | `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK, A-038 결제 원장(DELETE)·승인 금액 |
 | `tests/contract/schema/ledger-claims.test.ts` | **MIG-17~21 후속(74개)**: A-038 승인 시각, A-039 요청 수단·원문·미승인 결제의 수단 일치(+39), A-040 인증 세션 무결성(두 claim 순서, 보존·삭제 시나리오 포함), A-041 원장성 테이블 보호(벌크·실제 COMMIT 포함) |
+| `tests/contract/schema/ledger-evidence.test.ts` | **MIG-22·23 (63개)**: 승인 증거 불변(컬럼×역할 표 기반 테스트, 벌크, 강등, 허용 운영 UPDATE, 전이, 실제 COMMIT), 환불 핵심 불변(컬럼별·벌크·상태 전이·실제 COMMIT), `SEAT` 합계(COMMIT 시점, 실제 COMMIT 성공·실패) |
+| `tests/contract/schema/cli-guard.test.ts` | **MIG-24 (20개)**: 실제 Prisma CLI와 PostgreSQL로 `prisma.config.ts` 환경 가드 확인(`migrate deploy`·`migrate reset` 거부 시 DB 불변) |
+| `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(DB 불필요, `npm test`) |
 | `tests/unit/payment-method.test.ts` | A-039 서비스 규칙의 순수 함수 시험(DB 불필요, `npm test`): 생성 시 요청값 기록, 승인 시 요청값 불변, `DISALLOWED`→`OTHER`+원문, 원문 안전 검사 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
-| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 |
+| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
 | `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) |
 
 필수 제약 목록(단일 정본)은 `tests/contract/schema/manifest.ts`다. 새 제약·테이블을 추가하면 여기에도 추가한다. MIG-06은 이후 migration이 manifest의 객체를 DROP하거나(`DROP INDEX/CONSTRAINT/TRIGGER/FUNCTION`), 그 객체가 의존하는 컬럼·테이블을 DROP하면 실패한다(정당한 CHECK 어휘 확장의 `DROP`+`ADD`도 현재는 위반으로 판정한다 — S8로 개선 예정). 롤백 트랜잭션 헬퍼 `rolledBack`은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 실패한다.
@@ -115,6 +121,59 @@
 | M4 | `READY`는 달라도 허용하도록 완화 | 5개 실패 |
 | M5 | `CONFIRMING`/`UNKNOWN`은 달라도 허용하도록 완화 | 10개 실패 |
 | M6 | `SUCCEEDED`도 일치해야 하도록 과도하게 강화(승인 흐름이 깨짐) | 17개 실패 |
+
+#### 2.1.2 PR #2 후속 뮤테이션 결과 (2026-11-18)
+
+승인 증거 불변 트리거·환불 핵심 불변 트리거·`SEAT` 합계 지연 trigger·Prisma CLI 환경 가드를 하나씩 제거·약화·과도하게 강화하고(컬럼별 포함) `ledger-evidence`·`ledger-claims`·`consistency`·`integrity`(DB 계약)와 `cli-guard`·`seed`(CLI 가드) 테스트를 실행했다. 매번 원본을 복원했고 복원 후 두 파일은 원본과 바이트 단위로 같다. **43개 변형 중 40개가 검출**되었고 3개는 **동등 변이**(아래)라 동작이 같아 어떤 테스트로도 검출될 수 없다. 과도한 강화 변이(운영 컬럼을 불변으로 만들기)도 실패하므로 정상 운영 UPDATE를 막지 않는다는 점도 시험된다.
+
+| 변경 | 결과 |
+|---|---|
+| E0 payments_approved_evidence_no_change removed | 36개 실패 |
+| E evidence trigger no longer guards status | 4개 실패 |
+| E evidence trigger no longer guards order_id | 1개 실패 |
+| E evidence trigger no longer guards provider | 2개 실패 |
+| E evidence trigger no longer guards currency | 2개 실패 |
+| E evidence trigger no longer guards merchant_payment_ref | 2개 실패 |
+| E evidence trigger no longer guards provider_payment_id | 4개 실패 |
+| E evidence trigger no longer guards pg_transaction_id | 6개 실패 |
+| E evidence trigger no longer guards requested_amount | **미검출(동등 변이)** |
+| E evidence trigger no longer guards approved_amount | 1개 실패 |
+| E evidence trigger no longer guards approved_at | 4개 실패 |
+| E evidence trigger no longer guards method_type | 2개 실패 |
+| E evidence trigger no longer guards provider_method_raw | 4개 실패 |
+| E evidence trigger no longer guards easy_pay_provider | 2개 실패 |
+| E evidence trigger no longer guards card_company | 4개 실패 |
+| E guard only PRIMARY payments (WHEN role = PRIMARY) | 18개 실패 |
+| E guard only EXCESS payments (WHEN role = EXCESS) | 17개 실패 |
+| E guard fires for every payment, not only SUCCEEDED (over-strict) | 24개 실패 |
+| E over-strict: refunded_amount frozen | 5개 실패 |
+| E over-strict: last_verified_at frozen | 3개 실패 |
+| E over-strict: requery_count frozen | 3개 실패 |
+| R0 refunds_core_no_change removed | 15개 실패 |
+| R refund core trigger no longer guards id | 1개 실패 |
+| R refund core trigger no longer guards order_id | **미검출(동등 변이)** |
+| R refund core trigger no longer guards payment_id | 2개 실패 |
+| R refund core trigger no longer guards refund_type | 3개 실패 |
+| R refund core trigger no longer guards provider | 2개 실패 |
+| R refund core trigger no longer guards total_amount | 5개 실패 |
+| R refund core trigger no longer guards requested_by_admin_id | 3개 실패 |
+| R refund core trigger no longer guards created_at | 1개 실패 |
+| R over-strict: refund status frozen | 3개 실패 |
+| R over-strict: provider_refund_id frozen | 3개 실패 |
+| R over-strict: completed_at frozen | 3개 실패 |
+| S1 refunds_items_guard removed | 1개 실패 |
+| S2 refund_items_refund_guard removed | 2개 실패 |
+| S3 refunds_items_guard not deferred | 30개 실패 |
+| S4 refund_items_refund_guard not deferred | 7개 실패 |
+| S5 sum rule weakened to item_sum > total | 2개 실패 |
+| S6 sum rule weakened to item_sum < total | 4개 실패 |
+| S7 SEAT refund may have no items | **미검출(동등 변이)** |
+| S8 PAYMENT_EXCESS refund may have items | 1개 실패 |
+| P2 prisma.config.ts: guard call removed | 17개 실패 |
+| P2 prisma.config.ts: guard only when NAZIR_RUNTIME_ENV=test | 14개 실패 |
+
+동등 변이 3개의 이유: ① `requested_amount` 보호 제거 — 복합 FK `payments_order_total_fk`가 이미 어떤 변경도 거부한다(`requested_amount = orders.total_amount`이고 결제가 있으면 주문 총액도 RESTRICT). 테스트 "requested_amount is already fixed by the composite FK"가 FK로 거부됨을 확인한다. ② `refunds.order_id` 보호 제거 — `(payment_id, order_id)` 복합 FK 때문에 `order_id`는 결제가 바뀌어야만 바뀔 수 있고 `payment_id`가 불변이다. ③ `SEAT` 환불 "항목 없음" 분기 제거 — `total_amount > 0` CHECK 덕분에 항목 합계 0은 항상 총액과 달라 다음 분기가 같은 제약 이름으로 거부한다(분기는 오류 메시지를 명확하게 하려는 것). 세 곳 모두 중복 방어(defense in depth)로 남겼다.
+
 
 
 ### 2.2 후속 Step으로 이월한 DB 점검 (Step 2 기술 검토 S2·S5·S7·S8·S9·S10)
@@ -455,3 +514,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.3 | 2026-11-17 | MIG-17·MIG-18 신설(A-038 결제 원장 DELETE 차단, `SUCCEEDED` 승인 금액). 기존 시나리오 정의는 변경 없음 |
 | 1.2.4 | 2026-11-17 | MIG-17~18 보강, MIG-13 확장(바인딩), MIG-19(결제수단 요청값·원문, Q-027)·MIG-20(인증 세션 무결성, Q-028)·MIG-21(원장성 테이블 보호, Q-029) 신설, 테스트 파일 `ledger-claims.test.ts`·`payment-method.test.ts` 대응, 뮤테이션 시험 결과(§2.1.1) 추가. 기존 시나리오 정의는 변경 없음 |
 | 1.2.5 | 2026-11-18 | MIG-19 보강: 미승인 결제의 `method_type` = 요청값(CHECK `payments_unapproved_method_matches_request_ck`), `ledger-claims.test.ts` 35→74개, 뮤테이션 M1~M6 결과(§2.1.1). 기존 시나리오 정의는 변경 없음 |
+| 1.2.6 | 2026-11-18 | MIG-22(승인 증거 불변)·MIG-23(환불 핵심 불변·`SEAT` 합계)·MIG-24(Prisma CLI 환경 가드) 신설, 테스트 파일 `ledger-evidence.test.ts`·`cli-guard.test.ts`·`prisma-cli-guard.test.ts` 대응, 뮤테이션 시험(§2.1.2), SEED-03 대상 DB 조정·SEED-03b 추가, 기존 시나리오 정의 변경 1건(S3 `SUCCEEDED` 강등은 이제 문장 시점에 거부). |

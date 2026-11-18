@@ -407,13 +407,14 @@ describe("rule 10 — cumulative refunds never exceed the approved amount", () =
       await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", role: "PRIMARY", approved_amount: 100000 }), { code: PG.checkViolation, constraint: "payments_succeeded_role_ck" });
       const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000 });
       await expectInsertError(c, () => mkRefund(c, { orderId: order.id, paymentId: p.id }, { total_amount: 0 }), { code: PG.checkViolation, constraint: "refunds_total_amount_ck" });
-      const r = await mkRefund(c, { orderId: order.id, paymentId: p.id });
+      const r = await mkRefund(c, { orderId: order.id, paymentId: p.id }); // SEAT refund: its item (below) makes the total consistent
       const orderItem = await mkOrderItem(c, { orderId: order.id, sessionId: w.s1.id, sessionSeatId: w.s1b.id });
       await expectInsertError(
         c,
         () => insert(c, "refund_items", { refund_id: r.id, order_id: order.id, order_item_id: orderItem.id, amount: 0 }),
         { code: PG.checkViolation, constraint: "refund_items_amount_ck" },
       );
+      await insert(c, "refund_items", { refund_id: r.id, order_id: order.id, order_item_id: orderItem.id, amount: 100000 }); // control: SUM(items) = total_amount
     }));
 });
 
@@ -513,6 +514,7 @@ describe("rule 13 (MIG-08) — order / hold / item / ticket / refund ownership a
       });
       const ra = await mkRefund(c, { orderId: a.order.id, paymentId: pa.id }); // control
       const rb = await mkRefund(c, { orderId: b.order.id, paymentId: pb.id });
+      await insert(c, "refund_items", { refund_id: rb.id, order_id: b.order.id, order_item_id: b.item.id, amount: 100000 }); // control: rb is a consistent SEAT refund
 
       // item of order B inside a refund of order A
       await expectInsertError(
