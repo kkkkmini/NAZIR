@@ -121,6 +121,8 @@ export const DB_CONSTRAINT = {
   requestedMethodTypeCheck: "payments_requested_method_type_ck",
   otherRequiresRawCheck: "payments_other_requires_raw_ck",
   providerMethodRawCheck: "payments_provider_method_raw_ck",
+  /** CHECK: until SUCCEEDED, method_type equals the requested method (A-039). */
+  unapprovedMethodMatchesRequestCheck: "payments_unapproved_method_matches_request_ck",
   /** Deferred constraint-trigger errors (raised at COMMIT with SQLSTATE 23514). */
   confirmedPaymentNotPrimary: "orders_confirmed_payment_primary_ck",
   confirmedPaymentDetached: "orders_confirmed_payment_detach_ck",

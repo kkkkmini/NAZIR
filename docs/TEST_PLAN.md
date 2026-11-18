@@ -57,7 +57,7 @@
 | MIG-16 | 타임스탬프 출처(D3): DB 기본값 `CURRENT_TIMESTAMP`, raw SQL의 DB 시각(트랜잭션 시작), raw UPDATE는 `updated_at` 불변, Prisma Client는 앱 시각을 명시 전송 | 실측과 일치(Prisma 업그레이드 시 변하면 실패) |
 | MIG-17 | 결제 원장 보존(A-038): 참조 없는 `READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`/`SUCCEEDED`+`EXCESS` 결제와 확정 `PRIMARY`·로그가 있는 결제의 DELETE(개별·벌크·실제 커밋), 상태 전이·INSERT·UPDATE는 계속 허용, 롤백된 생성은 행을 남기지 않음 | DELETE는 모두 SQLSTATE `23001`, 정상 전이는 허용 |
 | MIG-18 | `SUCCEEDED`의 양수 `approved_amount`와 **`approved_at`**(A-038): INSERT·UPDATE·NULL·0·전이 우회. `SUCCEEDED`+`approved_at` NULL 거부, 값이 있으면 허용, 정상 전이(`READY`→`CONFIRMING`→`SUCCEEDED`) 허용, `SUCCEEDED`→`approved_at` NULL UPDATE 거부 | `SUCCEEDED`는 승인 금액·승인 시각 필수, 다른 상태는 NULL 허용, 승인된 결제는 환불 기록 가능 |
-| MIG-19 | 결제수단 요청값·원문(Q-027, A-039): 생성 시 `requested_method_type` 기록, 요청값 변경(`CARD`↔`EASY_PAY`, `OTHER`로 변경, `NULL`) 거부, `CARD→CARD`·`EASY_PAY→EASY_PAY` 승인, `CARD→OTHER`·`EASY_PAY→OTHER`(`method_type`만 변경, 요청값 유지) 허용, `OTHER`+원문 NULL 거부, 원문 위험 값(공백·9자리 이상 숫자·`@`·제어문자) 거부, 원문은 정규화 없이 그대로 저장, 요청값을 건드리지 않는 일반 UPDATE 허용, 승인 UPDATE 후에도 요청값 유지(서비스 순수 함수 `paymentApprovalMethodColumns`와 DB가 함께) | 요청값은 생성 후 불변, `OTHER`는 원문 필수, 나머지 전이는 기존 규칙대로 허용 |
+| MIG-19 | 결제수단 요청값·원문(Q-027, A-039): 생성 시 `requested_method_type` 기록, 요청값 변경(`CARD`↔`EASY_PAY`, `OTHER`로 변경, `NULL`) 거부, `CARD→CARD`·`EASY_PAY→EASY_PAY` 승인, `CARD→OTHER`·`EASY_PAY→OTHER`(`method_type`만 변경, 요청값 유지) 허용, `OTHER`+원문 NULL 거부, 원문 위험 값(공백·9자리 이상 숫자·`@`·제어문자) 거부, 원문은 정규화 없이 그대로 저장, 요청값을 건드리지 않는 일반 UPDATE 허용, 승인 UPDATE 후에도 요청값 유지(서비스 순수 함수 `paymentApprovalMethodColumns`와 DB가 함께) **(보강 2026-11-18)** 미승인 결제(`READY`/`CONFIRMING`/`UNKNOWN`/`FAILED`/`CANCELED`)의 `method_type` ≠ 요청값은 INSERT·UPDATE(단독·벌크·상태 전이 동시) 모두 거부, 일치하는 생성·전이는 허용, `SUCCEEDED`는 `CARD→CARD`/`CARD→EASY_PAY`/`CARD→OTHER`/`EASY_PAY→OTHER` 등 PG 결과대로 허용(EXCESS·PRIMARY 모두), 불일치 승인 결제를 미승인 상태로 되돌리는 UPDATE 거부 | 요청값은 생성 후 불변, `OTHER`는 원문 필수, **미승인 결제의 `method_type`은 요청값과 같다(`SUCCEEDED`에서만 다를 수 있음)**, 나머지 전이는 기존 규칙대로 허용 |
 | MIG-20 | 인증 세션 무결성(Q-028, A-040): `PENDING`·`FAILED`·`EXPIRED` 인증의 세션 거부(COMMIT), `VERIFIED`로 남은 인증의 세션 거부, 세션 없는 `CONSUMED` 거부, 다른 바인딩 세션 거부(FK), 세션 있는 `CONSUMED`를 `VERIFIED`/`PENDING`/`FAILED`로 되돌리기 거부, **claim 두 가지 문장 순서(세션 먼저·상태 먼저) 모두 허용**, `REVOKED`/`EXPIRED` 세션 허용, `PENDING`→`FAILED`→`EXPIRED` 정상 전이 허용, 보존·삭제 시나리오(세션→인증 순서 동시 삭제 허용, 세션만 삭제 거부, 인증만 삭제 FK 거부, 주문이 참조하는 세션 삭제 RESTRICT, 개인정보 컬럼 UPDATE 허용, `PENDING`/`FAILED`/`EXPIRED` 인증 삭제 허용) | 지연 trigger가 COMMIT에서 판정, 정상 claim은 막지 않음 |
 | MIG-21 | 원장성 테이블 보호(Q-029, A-041): `admin_audit_logs`·`payment_status_logs`·`refund_items`의 UPDATE·DELETE(개별·벌크·**실제 COMMIT**) 거부, `refunds` DELETE 거부·UPDATE(상태 전이) 허용, **범위 밖**(`tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`)은 차단되지 않음을 명시적으로 확인 | 차단 대상은 SQLSTATE `23001`, 범위 밖 테이블은 기존 동작 유지 |
 
@@ -69,7 +69,7 @@
 | `tests/contract/schema/migration-safety.test.ts` | **MIG-09**(모든 migration 트랜잭션 래핑 + 검사기 검증), **MIG-10**(실제 Prisma CLI, 실제 migration에 실패 주입, 롤백·`P3009`·`resolve --rolled-back`·재시도, 래퍼 없는 음성 대조군) |
 | `tests/contract/schema/integrity.test.ts` | MIG-05(동작), MIG-08, 규칙 1~14의 동작 증명(SQLSTATE·제약 이름 단언), 실제 2커넥션 동시 INSERT, QTA-18·QTA-19·ORD-17 중 DB 수준 부분 |
 | `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK, A-038 결제 원장(DELETE)·승인 금액 |
-| `tests/contract/schema/ledger-claims.test.ts` | **MIG-17~21 후속(35개)**: A-038 승인 시각, A-039 요청 수단·원문, A-040 인증 세션 무결성(두 claim 순서, 보존·삭제 시나리오 포함), A-041 원장성 테이블 보호(벌크·실제 COMMIT 포함) |
+| `tests/contract/schema/ledger-claims.test.ts` | **MIG-17~21 후속(74개)**: A-038 승인 시각, A-039 요청 수단·원문·미승인 결제의 수단 일치(+39), A-040 인증 세션 무결성(두 claim 순서, 보존·삭제 시나리오 포함), A-041 원장성 테이블 보호(벌크·실제 COMMIT 포함) |
 | `tests/unit/payment-method.test.ts` | A-039 서비스 규칙의 순수 함수 시험(DB 불필요, `npm test`): 생성 시 요청값 기록, 승인 시 요청값 불변, `DISALLOWED`→`OTHER`+원문, 원문 안전 검사 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
 | `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 |
@@ -104,6 +104,17 @@
 | N15 | refund_items_no_update removed | 2개 실패 |
 | N16 | refund_items_no_delete removed | 1개 실패 |
 | N17 | refunds_no_delete removed | 2개 실패 |
+
+**미승인 결제의 수단 일치 CHECK(`payments_unapproved_method_matches_request_ck`, 2026-11-18)**도 같은 방식으로 시험했다(`ledger-claims.test.ts`·`consistency.test.ts`, 매번 원본 복원, 복원 후 바이트 동일). **6개 변형 모두 검출**:
+
+| # | 변경 | 결과 |
+|---|---|---|
+| M1 | CHECK → `TRUE` | 28개 실패 |
+| M2 | CHECK 제거 | 28개 실패 |
+| M3 | `FAILED`/`CANCELED`는 달라도 허용하도록 완화 | 13개 실패 |
+| M4 | `READY`는 달라도 허용하도록 완화 | 5개 실패 |
+| M5 | `CONFIRMING`/`UNKNOWN`은 달라도 허용하도록 완화 | 10개 실패 |
+| M6 | `SUCCEEDED`도 일치해야 하도록 과도하게 강화(승인 흐름이 깨짐) | 17개 실패 |
 
 
 ### 2.2 후속 Step으로 이월한 DB 점검 (Step 2 기술 검토 S2·S5·S7·S8·S9·S10)
@@ -443,3 +454,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.2 | 2026-11-16 | Step 2 보완 반영: MIG-09~16 신설(migration 트랜잭션·실패 복구, 결제·주문 정합성, 쿼터 FK, 인증 세션 FK, `OTHER`, DELETE 차단, 타임스탬프), INV-9~12, §2.1 공허성 검증, §2.2 후속 Step 이월 항목. 기존 시나리오 정의는 변경 없음 |
 | 1.2.3 | 2026-11-17 | MIG-17·MIG-18 신설(A-038 결제 원장 DELETE 차단, `SUCCEEDED` 승인 금액). 기존 시나리오 정의는 변경 없음 |
 | 1.2.4 | 2026-11-17 | MIG-17~18 보강, MIG-13 확장(바인딩), MIG-19(결제수단 요청값·원문, Q-027)·MIG-20(인증 세션 무결성, Q-028)·MIG-21(원장성 테이블 보호, Q-029) 신설, 테스트 파일 `ledger-claims.test.ts`·`payment-method.test.ts` 대응, 뮤테이션 시험 결과(§2.1.1) 추가. 기존 시나리오 정의는 변경 없음 |
+| 1.2.5 | 2026-11-18 | MIG-19 보강: 미승인 결제의 `method_type` = 요청값(CHECK `payments_unapproved_method_matches_request_ck`), `ledger-claims.test.ts` 35→74개, 뮤테이션 M1~M6 결과(§2.1.1). 기존 시나리오 정의는 변경 없음 |

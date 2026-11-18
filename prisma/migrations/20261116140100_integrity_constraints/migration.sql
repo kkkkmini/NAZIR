@@ -220,6 +220,14 @@ ALTER TABLE "payments"
   ADD CONSTRAINT "payments_other_requires_raw_ck"
   CHECK ("method_type" <> 'OTHER' OR "provider_method_raw" IS NOT NULL);
 
+-- The effective method may differ from the request only once the PG has approved the payment (A-039). Until then
+-- (READY / CONFIRMING / UNKNOWN) and for attempts that never got approved (FAILED / CANCELED) method_type is the
+-- requested method. After approval (SUCCEEDED) it is whatever the PG reported: CARD -> EASY_PAY, CARD -> OTHER, ...
+-- NULL-safe by construction: status, method_type and requested_method_type are all NOT NULL.
+ALTER TABLE "payments"
+  ADD CONSTRAINT "payments_unapproved_method_matches_request_ck"
+  CHECK ("status" = 'SUCCEEDED' OR "method_type" = "requested_method_type");
+
 -- The raw label is a short method name ("카드", "가상계좌", ...), never personal or payment data. The DB rejects values
 -- that look like it: blank, 9+ consecutive digits (card / phone / account numbers), an e-mail marker, control chars.
 -- Nothing is transformed: the value is stored exactly as the adapter passes it.

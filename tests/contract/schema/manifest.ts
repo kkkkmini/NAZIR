@@ -208,6 +208,7 @@ export const CHECKS: CheckSpec[] = [
   { name: "payments_requested_method_type_ck", table: "payments", columns: ["requested_method_type"], vocab: PAYMENT_REQUEST_METHOD_TYPE, rule: "A-039: what the user chose" },
   { name: "payments_other_requires_raw_ck", table: "payments", columns: ["method_type", "provider_method_raw"], rule: "A-039: OTHER keeps the PG label" },
   { name: "payments_provider_method_raw_ck", table: "payments", columns: ["provider_method_raw"], rule: "A-039: no personal / payment data in the raw label" },
+  { name: "payments_unapproved_method_matches_request_ck", table: "payments", columns: ["status", "method_type", "requested_method_type"], rule: "A-039: method_type may differ from the request only once SUCCEEDED" },
   { name: "payments_succeeded_amount_ck", table: "payments", columns: ["status", "approved_amount"], rule: "A-038: SUCCEEDED carries a positive approved amount" },
   { name: "payments_primary_amount_ck", table: "payments", columns: ["role", "approved_amount", "requested_amount"], rule: "S3: PRIMARY approved = requested" },
   vocab("payment_webhook_events", "status", WEBHOOK_EVENT_STATUS),

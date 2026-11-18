@@ -183,6 +183,128 @@ describe("A-039 — requested_method_type and provider_method_raw", () => {
     }));
 });
 
+// ═════════════════════ A-039 (follow-up): method_type equals the request until the payment is SUCCEEDED ═════════════════════
+
+describe("A-039 — an unapproved payment's method_type matches the requested method", () => {
+  const mismatch = { code: PG.checkViolation, constraint: DB_CONSTRAINT.unapprovedMethodMatchesRequestCheck };
+  const other = (m: "CARD" | "EASY_PAY") => (m === "CARD" ? "EASY_PAY" : "CARD");
+  const NOT_APPROVED = ["READY", "CONFIRMING", "UNKNOWN", "FAILED", "CANCELED"] as const;
+  const REQUESTS = ["CARD", "EASY_PAY"] as const;
+
+  it.each(NOT_APPROVED.flatMap((status) => REQUESTS.map((req) => [status, req] as const)))(
+    "INSERT: %s payment, %s requested, a different method_type is rejected; the matching one is accepted",
+    (status, requested) =>
+      db.rolledBack(async (c) => {
+        const w = await mkWorld(c);
+        const order = await orderFor(c, w);
+        await expectInsertError(c, () => mkPayment(c, order.id, { status, requested_method_type: requested, method_type: other(requested) }), mismatch);
+        const ok = await mkPayment(c, order.id, { status, requested_method_type: requested, method_type: requested });
+        expect(ok).toMatchObject({ status, requested_method_type: requested, method_type: requested });
+      }),
+  );
+
+  it("the two cases from the review: CARD + READY + EASY_PAY and EASY_PAY + READY + CARD", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", requested_method_type: "CARD", method_type: "EASY_PAY" }), mismatch);
+      await expectInsertError(c, () => mkPayment(c, order.id, { status: "READY", requested_method_type: "EASY_PAY", method_type: "CARD" }), mismatch);
+      // the same pair is fine as soon as it is an approved payment
+      await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000, requested_method_type: "CARD", method_type: "EASY_PAY" });
+    }));
+
+  it.each(NOT_APPROVED.flatMap((status) => REQUESTS.map((req) => [status, req] as const)))(
+    "UPDATE: a %s payment (requested %s) cannot be given another method_type, alone or together with a state transition",
+    (status, requested) =>
+      db.rolledBack(async (c) => {
+        const w = await mkWorld(c);
+        const order = await orderFor(c, w);
+        const p = await mkPayment(c, order.id, { status, requested_method_type: requested, method_type: requested });
+        await expectDbError(c, `UPDATE payments SET method_type = $2 WHERE id = $1`, [p.id, other(requested)], mismatch); // single row
+        await expectDbError(c, `UPDATE payments SET method_type = $1 WHERE requested_method_type = $2`, [other(requested), requested], mismatch); // bulk
+        // writing the same value is fine
+        await c.query(`UPDATE payments SET method_type = $2, failure_message = 'noop' WHERE id = $1`, [p.id, requested]);
+        expect((await c.query(`SELECT method_type FROM payments WHERE id = $1`, [p.id])).rows[0].method_type).toBe(requested);
+      }),
+  );
+
+  it.each([
+    ["READY", "CONFIRMING"],
+    ["READY", "FAILED"],
+    ["READY", "CANCELED"],
+    ["CONFIRMING", "UNKNOWN"],
+    ["CONFIRMING", "FAILED"],
+    ["UNKNOWN", "FAILED"],
+  ] as const)("UPDATE: %s -> %s with a different method_type in the same statement is rejected", (from, to) =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id, { status: from, requested_method_type: "CARD", method_type: "CARD" });
+      await expectDbError(c, `UPDATE payments SET status = $2, method_type = 'EASY_PAY' WHERE id = $1`, [p.id, to], mismatch);
+    }),
+  );
+
+  it("normal creation and every unapproved state transition stay possible while method_type equals the request", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      for (const requested of REQUESTS) {
+        await c.query("SAVEPOINT lifecycle");
+        const cols = paymentCreationMethodColumns(requested);
+        expect(cols.method_type).toBe(cols.requested_method_type); // what the service writes satisfies the rule by construction
+        const p = await mkPayment(c, order.id, { ...cols });
+        for (const next of ["CONFIRMING", "UNKNOWN", "FAILED"]) {
+          await c.query(`UPDATE payments SET status = $2, updated_at = now() WHERE id = $1`, [p.id, next]);
+        }
+        const q = await mkPayment(c, order.id, { ...cols, status: "READY" }); // a retry is a new attempt
+        await c.query(`UPDATE payments SET status = 'CANCELED', canceled_at = now() WHERE id = $1`, [q.id]);
+        await c.query("ROLLBACK TO SAVEPOINT lifecycle");
+      }
+    }));
+
+  it.each([
+    ["CARD", "CARD", "EXCESS"],
+    ["CARD", "EASY_PAY", "EXCESS"],
+    ["CARD", "OTHER", "EXCESS"],
+    ["EASY_PAY", "EASY_PAY", "EXCESS"],
+    ["EASY_PAY", "CARD", "EXCESS"],
+    ["EASY_PAY", "OTHER", "EXCESS"],
+    ["CARD", "CARD", "PRIMARY"],
+    ["CARD", "EASY_PAY", "PRIMARY"],
+    ["EASY_PAY", "CARD", "PRIMARY"],
+    ["EASY_PAY", "EASY_PAY", "PRIMARY"],
+  ] as const)("approval: %s requested -> %s reported (%s) is accepted and keeps the request", (requested, reported, role) =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id, { ...paymentCreationMethodColumns(requested) });
+      const cols = paymentApprovalMethodColumns({
+        methodType: reported === "OTHER" ? "DISALLOWED" : reported,
+        rawMethod: reported === "OTHER" ? "가상계좌" : reported === "CARD" ? "카드" : "간편결제",
+      });
+      await c.query(
+        `UPDATE payments SET status = 'SUCCEEDED', role = $2, approved_amount = 100000, approved_at = now(),
+                method_type = $3, provider_method_raw = $4 WHERE id = $1`,
+        [p.id, role, cols.method_type, cols.provider_method_raw],
+      );
+      if (role === "PRIMARY") {
+        await update(c, "orders", order.id, { status: "PAID", confirmed_payment_id: p.id, paid_at: new Date() });
+        await checkAtCommit(c); // the deferred order <-> payment rules hold as well
+      }
+      const { rows } = await c.query(`SELECT requested_method_type, method_type FROM payments WHERE id = $1`, [p.id]);
+      expect(rows[0]).toEqual({ requested_method_type: requested, method_type: reported });
+    }),
+  );
+
+  it("an approved payment whose method differs from the request cannot be moved back out of SUCCEEDED", () =>
+    db.rolledBack(async (c) => {
+      const w = await mkWorld(c);
+      const order = await orderFor(c, w);
+      const p = await mkPayment(c, order.id, { status: "SUCCEEDED", role: "EXCESS", approved_amount: 100000, requested_method_type: "CARD", method_type: "EASY_PAY" });
+      await expectDbError(c, `UPDATE payments SET status = 'FAILED', role = NULL, approved_amount = NULL, approved_at = NULL WHERE id = $1`, [p.id], mismatch);
+    }));
+});
+
 // ═════════════════════════════ A-040: identity claim integrity (Q-028) ═════════════════════════════
 
 describe("A-040 — a session needs a CONSUMED verification of the same subject, purpose and browser", () => {
