@@ -3,13 +3,22 @@
  * applies at startup. Use before deploying: `npm run check:config`.
  * Prints only non-secret information.
  */
+import {
+  DatabaseConfigError,
+  assertDatabaseMatchesEnv,
+  describeDatabase,
+} from "../src/server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "../src/server/config/runtime-config";
 
 try {
   const c = loadRuntimeConfig(process.env);
-  console.log(JSON.stringify(describeRuntimeConfig(c), null, 2));
+  const summary: Record<string, unknown> = { ...describeRuntimeConfig(c) };
+  if (process.env.DATABASE_URL) {
+    summary.database = describeDatabase(assertDatabaseMatchesEnv(c.runtimeEnv, process.env.DATABASE_URL));
+  }
+  console.log(JSON.stringify(summary, null, 2));
 } catch (e) {
-  if (e instanceof ConfigError) {
+  if (e instanceof ConfigError || e instanceof DatabaseConfigError) {
     console.error(e.message);
     process.exit(1);
   }

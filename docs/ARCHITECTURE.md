@@ -198,12 +198,12 @@ PG(토스페이먼츠)와 본인인증(NICE아이디)은 adapter로 격리한다
 | `listEnabledMethods` | 서버 설정 | `[ { methodType: CARD, cardCompanies[] } \| { methodType: EASY_PAY, easyPayProvider } ]` | 설정 기반(D-012). PG의 선택적 활성화 가능 여부는 미확인 |
 | `createCheckout` | `merchantPaymentRef`, 금액, 주문명, `methodType`, `easyPayProvider?`, 허용 카드사, 서버 결정 success/fail URL | 브라우저에 넘길 불투명 파라미터 | `payment().requestPayment({ method: "CARD", flowMode, cardCompany \| easyPay, … })`. 카드=DEFAULT+`cardCompany`, 간편결제=DIRECT+`easyPay`(코드 미확인) |
 | `parseReturn` | 복귀 요청 | `{ merchantPaymentRef, providerPaymentKey, returnedAmount, outcome: AUTHENTICATED \| CHECKOUT_FAILED, failureCode? }` | successUrl `paymentKey`·`orderId`·`amount`, failUrl 에러 코드·메시지 |
-| `confirm` | ref, paymentKey, 금액, 결제 시도별 고정 멱등 키, timeout | `APPROVED{ approvedAmount, methodType \| DISALLOWED, cardCompany?, easyPayProvider?, approvedAt, transactionRef }` / `DECLINED{ code }` / `INDETERMINATE{ reason }` | `POST /v1/payments/confirm` + `Idempotency-Key`. timeout·네트워크 오류·5xx·409(처리 중)는 INDETERMINATE |
-| `getPayment` | paymentKey 또는 `merchantPaymentRef` | `{ state: NOT_FOUND \| AUTH_ONLY \| APPROVED \| FAILED \| EXPIRED \| CANCELED_PARTIAL \| CANCELED_FULL \| UNREADABLE, approvedAmount, methodType, cancels[{ providerRefundRef, amount, done, at }] }` | `GET /v1/payments/{paymentKey}`, `GET /v1/payments/orders/{orderId}`(API 개별 연동 시크릿 키 필요). `IN_PROGRESS`→AUTH_ONLY, `DONE`→APPROVED, `ABORTED`→FAILED. 승인 전 결제의 조회 응답 형식은 미확인 |
+| `confirm` | ref, paymentKey, 금액, 결제 시도별 고정 멱등 키, timeout | `APPROVED{ approvedAmount, methodType \| DISALLOWED, methodRaw, cardCompany?, easyPayProvider?, approvedAt, transactionRef }` / `DECLINED{ code }` / `INDETERMINATE{ reason }` | `POST /v1/payments/confirm` + `Idempotency-Key`. timeout·네트워크 오류·5xx·409(처리 중)는 INDETERMINATE |
+| `getPayment` | paymentKey 또는 `merchantPaymentRef` | `{ state: NOT_FOUND \| AUTH_ONLY \| APPROVED \| FAILED \| EXPIRED \| CANCELED_PARTIAL \| CANCELED_FULL \| UNREADABLE, approvedAmount, methodType, methodRaw?, cancels[{ providerRefundRef, amount, done, at }] }` | `GET /v1/payments/{paymentKey}`, `GET /v1/payments/orders/{orderId}`(API 개별 연동 시크릿 키 필요). `IN_PROGRESS`→AUTH_ONLY, `DONE`→APPROVED, `ABORTED`→FAILED. 승인 전 결제의 조회 응답 형식은 미확인 |
 | `verifyWebhook` / `parseWebhook` | 원본 본문·헤더 | `{ signature: VALID \| INVALID \| ABSENT, eventKind, lookupKey, dedupeKey }` | `tosspayments-webhook-signature`(보안 키 HMAC SHA-256), `eventId` 또는 조합 키(transmission-id 금지) |
 | `capabilities` | — | `{ serverConfirm: true, confirmValiditySec: 600, confirmIdempotent: true, lookupByMerchantRef: true, webhookSignature: true, defaultConfirmTimeoutSec: 60 }` | 원문 기반, timeout 값만 검색 근거 |
 
-- 허용 목록 검증(A-030): `APPROVED` 응답의 `methodType`/`cardCompany`/`easyPayProvider`가 결제 시작 시점 허용 목록 밖이면 도메인은 자동 확정하지 않는다(`EXCESS` + review case).
+- 허용 목록 검증(A-030): `APPROVED` 응답의 `methodType`/`cardCompany`/`easyPayProvider`가 결제 시작 시점 허용 목록 밖이면 도메인은 자동 확정하지 않는다(`EXCESS` + review case). `methodRaw`는 PG가 보고한 결제수단 라벨 **원문**(예: 토스 `method`)이며 adapter는 정규화·마스킹 없이 그대로 반환한다. 도메인이 `DISALLOWED`를 `OTHER`로 저장하며 `payments.provider_method_raw`에 원문을 남기고(`OTHER`이면 필수), 사용자의 요청 수단은 `payments.requested_method_type`에 생성 시 기록되어 승인 때 바뀌지 않는다(A-039, DATABASE §7.1).
 
 ### 6.3 Mock adapter (테스트 Provider 범위)
 
@@ -343,3 +343,4 @@ Mock은 서버 전용 모듈이며 클라이언트 번들에 포함하지 않는
 | 1.0 | 2026-11-13 | 개발 전달 기준안. 원문: `docs/archive/v1.0/ARCHITECTURE` |
 | 1.1 | 2026-11-14 | 파일명 `ARCHITECTURE.md`로 정정. 인증 선행 흐름(시퀀스 다이어그램), identity 모듈, 7분 점유와 3분 결제 확인 보호 구분, Tx1/confirm/Tx2/Tx3 상태 전이와 안전성 근거, UNKNOWN 해소 장치, Provider adapter 인터페이스와 mock 장애 주입 요건, 전역 잠금 순서, 백그라운드 작업 목록, 호스팅 확인 항목, 보안(바인딩·복귀 경로·rate limit 저장소) 추가 |
 | 1.2 | 2026-11-15 | 토스페이먼츠(결제창 API 개별 연동)·NICE아이디(통합인증) 확정. §6 Provider 인터페이스를 원문 기준 최종안으로 교체(정규화 원칙, NICE 결과 요청·복호화, 토스 confirm·orderId 조회·웹훅 서명), Mock 범위, Provider 단계(MOCK/SANDBOX/LIVE)와 fail-closed 기동 검사, Mock 빌드 제거 비교, 웹훅 처리 구조, 비밀값·거래 문맥 분리. §5.2a confirm timeout과 3분 보호 관계. §8 웹훅 처리·NICE 토큰 갱신 작업. §9 환경별 provider 매트릭스, NICE Outbound IP, 카드사 심사용 공개 사이트. 이전 원문: `docs/archive/v1.1/ARCHITECTURE.md` |
+| 1.2.4 | 2026-11-17 | §6 결제 adapter 출력에 PG 결제수단 원문 `methodRaw` 추가(`DATABASE.md` §7.1, A-039). 구조·책임은 변경 없음 |

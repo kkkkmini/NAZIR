@@ -1,0 +1,702 @@
+// NAZIR — Prisma schema (DATABASE.md v1.2, 27 core tables)
+//
+// Division of labour (DATABASE.md §14.1, docs/DATABASE.md §19):
+//   * This file: tables, column types, defaults, ALL foreign keys (including composite FKs),
+//     plain unique constraints and indexes.
+//   * prisma/migrations/*_integrity_constraints (raw SQL): CHECK constraints, partial unique
+//     indexes, the order_items UPDATE-blocking trigger.
+//
+// Things that look odd on purpose:
+//   * Status/enum-like columns are varchar + raw-SQL CHECK (not Prisma enums) so that
+//     partial-index predicates and CHECKs share one string vocabulary (see src/server/db/constants.ts).
+//   * `seats_venue_section_row_number_nnd_uq` is declared here as a plain unique only so Prisma
+//     does not DROP it as drift. The migration creates it as UNIQUE NULLS NOT DISTINCT (PG 15+).
+//   * Partial unique indexes are intentionally NOT declared here. Prisma 7.10 ignores them
+//     during diff (verified); the schema contract tests (MIG-02, MIG-06, DRIFT-01) guard them.
+//   * Some Prisma relations are 1:n on the Prisma side although the DB enforces 1:1 through a
+//     narrower unique (e.g. seat_holds.order_item_id). Prisma requires the unique to cover all
+//     relation fields to call it 1:1.
+//   * Every FK is ON DELETE RESTRICT / ON UPDATE RESTRICT (no cascade deletes; DATABASE.md §14).
+//   * `id` columns default to gen_random_uuid() in the DB so raw SQL inserts work without the client.
+//   * `updated_at` is maintained by Prisma Client (@updatedAt). Raw SQL writers must set it.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── 공연 및 좌석 (§4) ─────────────────────────────
+
+model Venue {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name            String   @db.VarChar(200)
+  address         String?
+  timezone        String   @default("Asia/Seoul") @db.VarChar(64)
+  seatMapVersion  String?  @map("seat_map_version") @db.VarChar(50)
+  seatMapAssetUrl String?  @map("seat_map_asset_url")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  shows Show[]
+  seats Seat[]
+
+  @@map("venues")
+}
+
+model Show {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  venueId       String    @map("venue_id") @db.Uuid
+  title         String    @db.VarChar(200)
+  slug          String    @db.VarChar(220)
+  description   String?
+  posterUrl     String?   @map("poster_url")
+  status        String    @db.VarChar(20) // CHECK: DRAFT | PUBLISHED | CLOSED
+  salesOpensAt  DateTime? @map("sales_opens_at") @db.Timestamptz(6)
+  salesClosesAt DateTime? @map("sales_closes_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  venue    Venue         @relation(fields: [venueId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "shows_venue_id_fk")
+  sessions ShowSession[]
+
+  @@unique([slug], map: "shows_slug_uq")
+  // target of the show_sessions (show_id, venue_id) composite FK
+  @@unique([id, venueId], map: "shows_id_venue_id_uq")
+  @@map("shows")
+}
+
+model ShowSession {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  showId              String    @map("show_id") @db.Uuid
+  venueId             String    @map("venue_id") @db.Uuid // denormalised from shows.venue_id, guarded by composite FK
+  startsAt            DateTime  @map("starts_at") @db.Timestamptz(6)
+  endsAt              DateTime? @map("ends_at") @db.Timestamptz(6)
+  salesStatus         String    @map("sales_status") @db.VarChar(20) // CHECK: ON_SALE | PAUSED | CLOSED | CANCELED
+  maxSeatsPerIdentity Int       @default(4) @map("max_seats_per_identity") @db.SmallInt // CHECK 1..4 (D-006)
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  show         Show            @relation(fields: [showId, venueId], references: [id, venueId], onDelete: Restrict, onUpdate: Restrict, map: "show_sessions_show_venue_fk")
+  sessionSeats SessionSeat[]
+  orders       Order[]
+  quotas       PurchaseQuota[]
+
+  // target of session_seats (show_session_id, venue_id) composite FK
+  @@unique([id, venueId], map: "show_sessions_id_venue_id_uq")
+  @@index([showId, startsAt], map: "show_sessions_show_id_starts_at_idx")
+  @@map("show_sessions")
+}
+
+model Seat {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  venueId     String   @map("venue_id") @db.Uuid
+  svgSeatId   String   @map("svg_seat_id") @db.VarChar(100)
+  sectionName String?  @map("section_name") @db.VarChar(100)
+  rowLabel    String?  @map("row_label") @db.VarChar(30)
+  seatNumber  String   @map("seat_number") @db.VarChar(30)
+  seatLabel   String?  @map("seat_label") @db.VarChar(100)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  venue        Venue         @relation(fields: [venueId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "seats_venue_id_fk")
+  sessionSeats SessionSeat[]
+
+  @@unique([venueId, svgSeatId], map: "seats_venue_svg_seat_uq")
+  // Created as UNIQUE NULLS NOT DISTINCT in the migration (declared here only to avoid drift DROP).
+  @@unique([venueId, sectionName, rowLabel, seatNumber], map: "seats_venue_section_row_number_nnd_uq")
+  // target of session_seats (seat_id, venue_id) composite FK
+  @@unique([id, venueId], map: "seats_id_venue_id_uq")
+  @@map("seats")
+}
+
+model SessionSeat {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  showSessionId   String   @map("show_session_id") @db.Uuid
+  seatId          String   @map("seat_id") @db.Uuid
+  venueId         String   @map("venue_id") @db.Uuid // guarded by composite FKs to show_sessions and seats
+  price           BigInt // CHECK >= 0
+  status          String   @db.VarChar(20) // CHECK: AVAILABLE | SOLD | BLOCKED ; HELD is never stored (§11.1)
+  soldOrderItemId String?  @map("sold_order_item_id") @db.Uuid // sale owner (A-013)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  showSession   ShowSession     @relation(fields: [showSessionId, venueId], references: [id, venueId], onDelete: Restrict, onUpdate: Restrict, map: "session_seats_session_venue_fk")
+  seat          Seat            @relation(fields: [seatId, venueId], references: [id, venueId], onDelete: Restrict, onUpdate: Restrict, map: "session_seats_seat_venue_fk")
+  // circular with order_items; sold_order_item_id is only set at sale confirmation time.
+  soldOrderItem OrderItem?      @relation("SessionSeatSoldItem", fields: [soldOrderItemId, id], references: [id, sessionSeatId], onDelete: Restrict, onUpdate: Restrict, map: "session_seats_sold_item_seat_fk")
+  orderItems    OrderItem[]     @relation("OrderItemSessionSeat")
+  statusLogs    SeatStatusLog[]
+
+  @@unique([showSessionId, seatId], map: "session_seats_session_seat_uq")
+  // target of order_items (session_seat_id, show_session_id) composite FK
+  @@unique([id, showSessionId], map: "session_seats_id_session_uq")
+  @@unique([soldOrderItemId], map: "session_seats_sold_order_item_id_uq")
+  @@index([showSessionId, status], map: "session_seats_session_status_idx")
+  @@map("session_seats")
+}
+
+// ───────────────────────────── 본인인증 (§6) ─────────────────────────────
+
+model IdentitySubject {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subjectKeyHash String   @map("subject_key_hash") @db.VarChar(255) // HMAC only, never the raw DI/CI/phone
+  subjectKeyType String   @map("subject_key_type") @db.VarChar(20) // CHECK: DI | CI | PHONE
+  keyVersion     Int      @map("key_version") @db.SmallInt
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  verifications IdentityVerification[]
+  sessions      IdentitySession[]
+  quotas        PurchaseQuota[]
+  orders        Order[]
+
+  @@unique([subjectKeyType, keyVersion, subjectKeyHash], map: "identity_subjects_key_uq")
+  @@map("identity_subjects")
+}
+
+model IdentityVerification {
+  id                       String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  purpose                  String    @db.VarChar(20) // CHECK: BOOKING | LOOKUP
+  provider                 String    @db.VarChar(50)
+  providerTransactionId    String?   @map("provider_transaction_id") @db.VarChar(200)
+  browserBindingHash       String    @map("browser_binding_hash") @db.VarChar(255)
+  stateNonceHash           String    @map("state_nonce_hash") @db.VarChar(255)
+  providerContextEncrypted String?   @map("provider_context_encrypted") // per-transaction temporary context only (A-028)
+  status                   String    @db.VarChar(20) // CHECK: PENDING | VERIFIED | CONSUMED | FAILED | EXPIRED
+  identitySubjectId        String?   @map("identity_subject_id") @db.Uuid
+  verifiedName             String?   @map("verified_name")
+  verifiedPhone            String?   @map("verified_phone")
+  verifiedAt               DateTime? @map("verified_at") @db.Timestamptz(6)
+  claimExpiresAt           DateTime? @map("claim_expires_at") @db.Timestamptz(6)
+  expiresAt                DateTime  @map("expires_at") @db.Timestamptz(6)
+  failureCode              String?   @map("failure_code") @db.VarChar(100)
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  identitySubject IdentitySubject?  @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_verifications_subject_fk")
+  // DB enforces at most one session per verification (identity_sessions.identity_verification_id UNIQUE);
+  // Prisma needs a unique over all four composite-FK columns to call it 1:1, hence the list.
+  sessions        IdentitySession[]
+
+  @@unique([provider, providerTransactionId], map: "identity_verifications_provider_txn_uq")
+  // target of the identity_sessions claim FK: (verification, subject, purpose, browser binding) must all match (A-040)
+  @@unique([id, identitySubjectId, purpose, browserBindingHash], map: "identity_verifications_id_subject_purpose_binding_uq")
+  @@index([browserBindingHash, createdAt], map: "identity_verifications_binding_created_idx")
+  @@index([status, expiresAt], map: "identity_verifications_status_expires_idx")
+  @@map("identity_verifications")
+}
+
+model IdentitySession {
+  id                     String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  identityVerificationId String    @map("identity_verification_id") @db.Uuid
+  identitySubjectId      String    @map("identity_subject_id") @db.Uuid
+  purpose                String    @db.VarChar(20) // CHECK: BOOKING | LOOKUP
+  tokenHash              String    @map("token_hash") @db.VarChar(255)
+  browserBindingHash     String    @map("browser_binding_hash") @db.VarChar(255)
+  status                 String    @db.VarChar(20) // CHECK: ACTIVE | REVOKED | EXPIRED
+  expiresAt              DateTime  @map("expires_at") @db.Timestamptz(6)
+  lastUsedAt             DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt              DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // a session carries exactly the subject, purpose and BROWSER BINDING of the verification it claims (Q-024, A-040)
+  verification IdentityVerification @relation(fields: [identityVerificationId, identitySubjectId, purpose, browserBindingHash], references: [id, identitySubjectId, purpose, browserBindingHash], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_verification_claim_fk")
+  subject      IdentitySubject      @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "identity_sessions_subject_fk")
+  orders       Order[]
+
+  @@unique([identityVerificationId], map: "identity_sessions_verification_uq")
+  @@unique([tokenHash], map: "identity_sessions_token_hash_uq")
+  // target of orders (identity_session_id, identity_subject_id) composite FK
+  @@unique([id, identitySubjectId], map: "identity_sessions_id_subject_uq")
+  @@index([identitySubjectId, status], map: "identity_sessions_subject_status_idx")
+  @@index([browserBindingHash, status], map: "identity_sessions_binding_status_idx")
+  @@map("identity_sessions")
+}
+
+// ───────────────────────────── 예매 및 점유 (§5) ─────────────────────────────
+
+model PurchaseQuota {
+  identitySubjectId String   @map("identity_subject_id") @db.Uuid
+  showSessionId     String   @map("show_session_id") @db.Uuid
+  seatLimit         Int      @map("seat_limit") @db.SmallInt // snapshot at row creation (A-029); CHECK 1..4
+  countedSeats      Int      @default(0) @map("counted_seats") @db.SmallInt // CHECK 0..seat_limit
+  version           BigInt   @default(0)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  identitySubject IdentitySubject @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "purchase_quotas_subject_fk")
+  showSession     ShowSession     @relation(fields: [showSessionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "purchase_quotas_session_fk")
+  orders          Order[]
+
+  @@id([identitySubjectId, showSessionId])
+  @@map("purchase_quotas")
+}
+
+model Order {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber           String    @map("order_number") @db.VarChar(40)
+  showSessionId         String    @map("show_session_id") @db.Uuid
+  identitySubjectId     String    @map("identity_subject_id") @db.Uuid
+  identitySessionId     String    @map("identity_session_id") @db.Uuid
+  status                String    @db.VarChar(30) // CHECK: PENDING | PAYMENT_CONFIRMING | PAYMENT_UNKNOWN | REVIEW_REQUIRED | UNFULFILLED | PAID | CANCELED | EXPIRED | REFUNDED
+  customerName          String    @map("customer_name")
+  customerPhone         String    @map("customer_phone")
+  customerEmail         String?   @map("customer_email") @db.VarChar(254)
+  totalAmount           BigInt    @map("total_amount") // CHECK >= 0
+  currency              String    @default("KRW") @db.Char(3)
+  holdExpiresAt         DateTime  @map("hold_expires_at") @db.Timestamptz(6) // single source of truth for hold expiry (A-007)
+  confirmProtectedUntil DateTime? @map("confirm_protected_until") @db.Timestamptz(6)
+  confirmedPaymentId    String?   @map("confirmed_payment_id") @db.Uuid
+  adminMemo             String?   @map("admin_memo")
+  paidAt                DateTime? @map("paid_at") @db.Timestamptz(6)
+  closedAt              DateTime? @map("closed_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  showSession      ShowSession     @relation(fields: [showSessionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "orders_show_session_fk")
+  identitySubject  IdentitySubject @relation(fields: [identitySubjectId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "orders_subject_fk")
+  // an order cannot exist without its own purchase_quotas row (S4 / A-033); the row is locked first in §11.2
+  quota            PurchaseQuota   @relation(fields: [identitySubjectId, showSessionId], references: [identitySubjectId, showSessionId], onDelete: Restrict, onUpdate: Restrict, map: "orders_quota_fk")
+  // the identity session must belong to the same subject (rule 12)
+  identitySession  IdentitySession @relation(fields: [identitySessionId, identitySubjectId], references: [id, identitySubjectId], onDelete: Restrict, onUpdate: Restrict, map: "orders_identity_session_subject_fk")
+  // the confirmed payment must belong to this very order (rule 8, B2). Circular with payments.
+  confirmedPayment Payment?        @relation("OrderConfirmedPayment", fields: [confirmedPaymentId, id], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict, map: "orders_confirmed_payment_fk")
+
+  payments       Payment[]            @relation("PaymentOrder")
+  items          OrderItem[]
+  statusLogs     OrderStatusLog[]
+  accessSessions OrderAccessSession[]
+  reviewCases    ReviewCase[]
+
+  @@unique([orderNumber], map: "orders_order_number_uq")
+  @@unique([confirmedPaymentId], map: "orders_confirmed_payment_id_uq")
+  // target of order_items (order_id, show_session_id) composite FK
+  @@unique([id, showSessionId], map: "orders_id_session_uq")
+  // target of payments (order_id, requested_amount) composite FK: a payment is always for the order's exact total (S3)
+  @@unique([id, totalAmount], map: "orders_id_total_uq")
+  @@index([status, holdExpiresAt], map: "orders_status_hold_expires_idx")
+  @@index([status, confirmProtectedUntil], map: "orders_status_confirm_protected_idx")
+  @@index([identitySubjectId, createdAt], map: "orders_subject_created_idx")
+  @@map("orders")
+}
+
+/// Immutable after insert (D-001 / A-006). A trigger in the raw SQL migration rejects UPDATE.
+/// There is intentionally no updated_at column.
+model OrderItem {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId       String   @map("order_id") @db.Uuid
+  showSessionId String   @map("show_session_id") @db.Uuid
+  sessionSeatId String   @map("session_seat_id") @db.Uuid
+  price         BigInt // CHECK >= 0, price snapshot at hold time
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // all items of an order belong to the order's session (rule 4) and the seat's session (rule 5)
+  order       Order       @relation(fields: [orderId, showSessionId], references: [id, showSessionId], onDelete: Restrict, onUpdate: Restrict, map: "order_items_order_session_fk")
+  sessionSeat SessionSeat @relation("OrderItemSessionSeat", fields: [sessionSeatId, showSessionId], references: [id, showSessionId], onDelete: Restrict, onUpdate: Restrict, map: "order_items_seat_session_fk")
+
+  soldSeats   SessionSeat[] @relation("SessionSeatSoldItem")
+  seatHolds   SeatHold[] // DB enforces 1:1 via seat_holds.order_item_id UNIQUE
+  tickets     Ticket[] // DB enforces 1:1 via tickets.order_item_id UNIQUE
+  refundItems RefundItem[]
+
+  @@unique([orderId, sessionSeatId], map: "order_items_order_seat_uq")
+  // composite FK targets
+  @@unique([id, orderId], map: "order_items_id_order_uq")
+  @@unique([id, sessionSeatId], map: "order_items_id_seat_uq")
+  @@unique([id, orderId, sessionSeatId], map: "order_items_id_order_seat_uq")
+  @@map("order_items")
+}
+
+model SeatHold {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId        String    @map("order_id") @db.Uuid
+  orderItemId    String    @map("order_item_id") @db.Uuid
+  sessionSeatId  String    @map("session_seat_id") @db.Uuid
+  status         String    @db.VarChar(20) // CHECK: ACTIVE | CONFIRMING | CONVERTED | RELEASED | EXPIRED
+  releasedReason String?   @map("released_reason") @db.VarChar(30) // CHECK: USER_CANCELED | PAYMENT_FAILED | ADMIN_RESOLVED | REFUND_RESOLVED
+  endedAt        DateTime? @map("ended_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // hold.order / hold.seat must equal the item's order / seat (rule 13)
+  orderItem OrderItem @relation(fields: [orderItemId, orderId, sessionSeatId], references: [id, orderId, sessionSeatId], onDelete: Restrict, onUpdate: Restrict, map: "seat_holds_item_order_seat_fk")
+
+  @@unique([orderItemId], map: "seat_holds_order_item_id_uq")
+  // + partial unique (session_seat_id) WHERE status IN ('ACTIVE','CONFIRMING') in raw SQL
+  @@index([orderId, status], map: "seat_holds_order_status_idx")
+  @@map("seat_holds")
+}
+
+model OrderStatusLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId    String   @map("order_id") @db.Uuid
+  fromStatus String?  @map("from_status") @db.VarChar(30)
+  toStatus   String   @map("to_status") @db.VarChar(30)
+  source     String   @db.VarChar(30) // CHECK: API | RETURN | WEBHOOK | PG_REQUERY | EXPIRY_JOB | ADMIN | SYSTEM
+  adminId    String?  @map("admin_id") @db.Uuid
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  order Order  @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "order_status_logs_order_fk")
+  admin Admin? @relation(fields: [adminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "order_status_logs_admin_fk")
+
+  @@index([orderId, createdAt], map: "order_status_logs_order_created_idx")
+  @@map("order_status_logs")
+}
+
+model SeatStatusLog {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionSeatId String   @map("session_seat_id") @db.Uuid
+  fromStatus    String?  @map("from_status") @db.VarChar(20)
+  toStatus      String   @map("to_status") @db.VarChar(20)
+  orderItemId   String?  @map("order_item_id") @db.Uuid
+  reason        String?
+  actorType     String   @map("actor_type") @db.VarChar(20) // CHECK: ADMIN | SYSTEM
+  adminId       String?  @map("admin_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  sessionSeat SessionSeat @relation(fields: [sessionSeatId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "seat_status_logs_seat_fk")
+  admin       Admin?      @relation(fields: [adminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "seat_status_logs_admin_fk")
+
+  // not listed in DATABASE.md §14; added for parity with the other log tables (see docs/DATABASE.md §19.6)
+  @@index([sessionSeatId, createdAt], map: "seat_status_logs_seat_created_idx")
+  @@map("seat_status_logs")
+}
+
+model OrderAccessSession {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId            String    @map("order_id") @db.Uuid
+  tokenHash          String    @map("token_hash") @db.VarChar(255)
+  browserBindingHash String    @map("browser_binding_hash") @db.VarChar(255)
+  scope              String    @db.VarChar(30) // CHECK: CONFIRMATION_VIEW (Phase 1 only)
+  status             String    @db.VarChar(20) // CHECK: ACTIVE | REVOKED | EXPIRED
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  lastUsedAt         DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt          DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "order_access_sessions_order_fk")
+
+  @@unique([tokenHash], map: "order_access_sessions_token_hash_uq")
+  @@index([orderId, status], map: "order_access_sessions_order_status_idx")
+  @@map("order_access_sessions")
+}
+
+model IdempotencyRecord {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scope              String    @db.VarChar(200) // actual path value, e.g. "POST /orders/{orderId}/payments"
+  ownerKeyHash       String    @map("owner_key_hash") @db.VarChar(255)
+  idempotencyKeyHash String    @map("idempotency_key_hash") @db.VarChar(255)
+  requestHash        String    @map("request_hash") @db.VarChar(255)
+  resourceType       String?   @map("resource_type") @db.VarChar(50) // CHECK: ORDER | PAYMENT
+  resourceId         String?   @map("resource_id") @db.Uuid
+  responseStatus     Int?      @map("response_status")
+  responseBody       Json?     @map("response_body")
+  status             String    @db.VarChar(20) // CHECK: PROCESSING | COMPLETED | FAILED
+  lockedUntil        DateTime? @map("locked_until") @db.Timestamptz(6)
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([scope, ownerKeyHash, idempotencyKeyHash], map: "idempotency_records_scope_owner_key_uq")
+  @@index([expiresAt], map: "idempotency_records_expires_idx")
+  @@map("idempotency_records")
+}
+
+// ───────────────────────────── 결제 및 환불 (§7) ─────────────────────────────
+
+model Payment {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId             String    @map("order_id") @db.Uuid
+  provider            String    @db.VarChar(50)
+  merchantPaymentRef  String    @map("merchant_payment_ref") @db.VarChar(64)
+  providerPaymentId   String?   @map("provider_payment_id") @db.VarChar(200)
+  pgTransactionId     String?   @map("pg_transaction_id") @db.VarChar(200)
+  status              String    @db.VarChar(30) // CHECK: READY | CONFIRMING | UNKNOWN | SUCCEEDED | FAILED | CANCELED
+  role                String?   @db.VarChar(20) // CHECK: PRIMARY | EXCESS ; set iff status = SUCCEEDED
+  methodType          String    @map("method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY | OTHER; OTHER only for SUCCEEDED + EXCESS (D-005, Q-022). Normalised effective method: requested until approval, then the PG-reported one
+  requestedMethodType String    @map("requested_method_type") @db.VarChar(20) // CHECK: CARD | EASY_PAY. What the user chose when the attempt was created; immutable (trigger) (A-039)
+  providerMethodRaw   String?   @map("provider_method_raw") @db.VarChar(100) // PG-reported method label, verbatim; required when method_type = OTHER; format-guarded (A-039)
+  easyPayProvider     String?   @map("easy_pay_provider") @db.VarChar(50)
+  cardCompany         String?   @map("card_company") @db.VarChar(50)
+  requestedAmount     BigInt    @map("requested_amount") // CHECK > 0
+  approvedAmount      BigInt?   @map("approved_amount") // CHECK NULL or >= 0
+  refundedAmount      BigInt    @default(0) @map("refunded_amount") // CHECK 0 <= refunded <= COALESCE(approved, 0)
+  currency            String    @default("KRW") @db.Char(3)
+  returnNonceHash     String    @map("return_nonce_hash") @db.VarChar(255)
+  checkoutExpiresAt   DateTime  @map("checkout_expires_at") @db.Timestamptz(6)
+  confirmStartedAt    DateTime? @map("confirm_started_at") @db.Timestamptz(6)
+  unknownSince        DateTime? @map("unknown_since") @db.Timestamptz(6)
+  nextRequeryAt       DateTime? @map("next_requery_at") @db.Timestamptz(6)
+  requeryCount        Int       @default(0) @map("requery_count")
+  lastVerifiedAt      DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  approvedAt          DateTime? @map("approved_at") @db.Timestamptz(6)
+  failedAt            DateTime? @map("failed_at") @db.Timestamptz(6)
+  canceledAt          DateTime? @map("canceled_at") @db.Timestamptz(6)
+  failureCode         String?   @map("failure_code") @db.VarChar(100)
+  failureMessage      String?   @map("failure_message")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // requested_amount must equal the order's total_amount (S3 rule 7); the FK also guarantees the order exists.
+  order Order @relation("PaymentOrder", fields: [orderId, requestedAmount], references: [id, totalAmount], onDelete: Restrict, onUpdate: Restrict, map: "payments_order_total_fk")
+
+  // DB enforces 1:1 via orders.confirmed_payment_id UNIQUE
+  confirmedForOrders Order[]               @relation("OrderConfirmedPayment")
+  webhookEvents      PaymentWebhookEvent[]
+  statusLogs         PaymentStatusLog[]
+  refunds            Refund[]
+  reviewCases        ReviewCase[]
+
+  @@unique([merchantPaymentRef], map: "payments_merchant_payment_ref_uq")
+  @@unique([provider, pgTransactionId], map: "payments_provider_pg_txn_uq")
+  @@unique([provider, providerPaymentId], map: "payments_provider_payment_id_uq")
+  // composite FK targets (orders.confirmed_payment, refunds.payment)
+  @@unique([id, orderId], map: "payments_id_order_uq")
+  // + partial unique (order_id) WHERE status IN ('READY','CONFIRMING','UNKNOWN') in raw SQL
+  // + partial unique (order_id) WHERE role = 'PRIMARY' in raw SQL (S3)
+  @@index([orderId, createdAt], map: "payments_order_created_idx")
+  @@index([status, nextRequeryAt], map: "payments_status_next_requery_idx")
+  @@map("payments")
+}
+
+model PaymentWebhookEvent {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider          String    @db.VarChar(50)
+  providerEventId   String?   @map("provider_event_id") @db.VarChar(200)
+  deduplicationKey  String    @map("deduplication_key") @db.VarChar(255)
+  paymentId         String?   @map("payment_id") @db.Uuid
+  eventType         String    @map("event_type") @db.VarChar(100)
+  signatureVerified Boolean   @map("signature_verified")
+  payloadHash       String    @map("payload_hash") @db.VarChar(255)
+  payloadRedacted   Json?     @map("payload_redacted")
+  status            String    @db.VarChar(20) // CHECK: RECEIVED | PROCESSING | PROCESSED | FAILED | IGNORED | UNMATCHED
+  attemptCount      Int       @default(0) @map("attempt_count")
+  lockedUntil       DateTime? @map("locked_until") @db.Timestamptz(6)
+  failureReason     String?   @map("failure_reason")
+  receivedAt        DateTime  @default(now()) @map("received_at") @db.Timestamptz(6)
+  lastReceivedAt    DateTime  @default(now()) @map("last_received_at") @db.Timestamptz(6)
+  processedAt       DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  payment Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "payment_webhook_events_payment_fk")
+
+  @@unique([provider, deduplicationKey], map: "payment_webhook_events_dedup_uq")
+  @@index([status, receivedAt], map: "payment_webhook_events_status_received_idx")
+  @@map("payment_webhook_events")
+}
+
+model PaymentStatusLog {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentId     String   @map("payment_id") @db.Uuid
+  fromStatus    String?  @map("from_status") @db.VarChar(30)
+  toStatus      String   @map("to_status") @db.VarChar(30)
+  source        String   @db.VarChar(30) // CHECK: API | RETURN | WEBHOOK | PG_REQUERY | ADMIN | SYSTEM
+  sourceEventId String?  @map("source_event_id") @db.Uuid
+  note          String?
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "payment_status_logs_payment_fk")
+
+  @@index([paymentId, createdAt], map: "payment_status_logs_payment_created_idx")
+  @@map("payment_status_logs")
+}
+
+model Refund {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId             String    @map("order_id") @db.Uuid
+  paymentId           String    @map("payment_id") @db.Uuid
+  refundType          String    @map("refund_type") @db.VarChar(20) // CHECK: SEAT | PAYMENT_EXCESS
+  provider            String    @db.VarChar(50)
+  providerRefundId    String?   @map("provider_refund_id") @db.VarChar(200)
+  totalAmount         BigInt    @map("total_amount") // CHECK > 0
+  status              String    @db.VarChar(20) // CHECK: REQUESTED | VERIFYING | COMPLETED | FAILED | WITHDRAWN
+  reason              String?
+  requestedByAdminId  String?   @map("requested_by_admin_id") @db.Uuid
+  pgExecutedByAdminId String?   @map("pg_executed_by_admin_id") @db.Uuid
+  verifiedAt          DateTime? @map("verified_at") @db.Timestamptz(6)
+  completedAt         DateTime? @map("completed_at") @db.Timestamptz(6)
+  failureReason       String?   @map("failure_reason")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // refund and its payment must belong to the same order (rule 13, H2)
+  payment           Payment @relation(fields: [paymentId, orderId], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict, map: "refunds_payment_order_fk")
+  requestedByAdmin  Admin?  @relation("RefundRequestedBy", fields: [requestedByAdminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "refunds_requested_by_fk")
+  pgExecutedByAdmin Admin?  @relation("RefundPgExecutedBy", fields: [pgExecutedByAdminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "refunds_pg_executed_by_fk")
+
+  items       RefundItem[]
+  reviewCases ReviewCase[]
+
+  @@unique([provider, providerRefundId], map: "refunds_provider_refund_id_uq")
+  // composite FK target for refund_items
+  @@unique([id, orderId], map: "refunds_id_order_uq")
+  @@index([orderId, createdAt], map: "refunds_order_created_idx")
+  @@index([status, updatedAt], map: "refunds_status_updated_idx")
+  @@map("refunds")
+}
+
+model RefundItem {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  refundId    String   @map("refund_id") @db.Uuid
+  orderId     String   @map("order_id") @db.Uuid
+  orderItemId String   @map("order_item_id") @db.Uuid
+  amount      BigInt // CHECK > 0
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  refund    Refund    @relation(fields: [refundId, orderId], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict, map: "refund_items_refund_order_fk")
+  orderItem OrderItem @relation(fields: [orderItemId, orderId], references: [id, orderId], onDelete: Restrict, onUpdate: Restrict, map: "refund_items_item_order_fk")
+
+  @@unique([refundId, orderItemId], map: "refund_items_refund_item_uq")
+  @@index([orderItemId], map: "refund_items_order_item_idx")
+  @@map("refund_items")
+}
+
+// ───────────────────────────── 티켓 (§8) ─────────────────────────────
+
+model Ticket {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketNumber  String    @map("ticket_number") @db.VarChar(40)
+  orderItemId   String    @map("order_item_id") @db.Uuid
+  sessionSeatId String    @map("session_seat_id") @db.Uuid
+  status        String    @db.VarChar(20) // CHECK: ISSUED | USED | VOID
+  qrTokenHash   String?   @map("qr_token_hash") @db.VarChar(255)
+  issuedAt      DateTime  @map("issued_at") @db.Timestamptz(6)
+  usedAt        DateTime? @map("used_at") @db.Timestamptz(6)
+  voidedAt      DateTime? @map("voided_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  orderItem OrderItem @relation(fields: [orderItemId, sessionSeatId], references: [id, sessionSeatId], onDelete: Restrict, onUpdate: Restrict, map: "tickets_item_seat_fk")
+
+  @@unique([ticketNumber], map: "tickets_ticket_number_uq")
+  @@unique([orderItemId], map: "tickets_order_item_id_uq")
+  // + partial unique (session_seat_id) WHERE status IN ('ISSUED','USED') in raw SQL
+  @@map("tickets")
+}
+
+// ───────────────────────────── 관리자 (§9) ─────────────────────────────
+
+model Admin {
+  id                 String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email              String    @db.VarChar(254)
+  passwordHash       String    @map("password_hash")
+  name               String    @db.VarChar(100)
+  role               String    @db.VarChar(30) // CHECK: SUPER_ADMIN | STAFF
+  mfaSecretEncrypted String?   @map("mfa_secret_encrypted")
+  isActive           Boolean   @default(true) @map("is_active")
+  lastLoginAt        DateTime? @map("last_login_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  sessions            AdminSession[]
+  auditLogs           AdminAuditLog[]
+  orderStatusLogs     OrderStatusLog[]
+  seatStatusLogs      SeatStatusLog[]
+  refundsRequested    Refund[]         @relation("RefundRequestedBy")
+  refundsPgExecuted   Refund[]         @relation("RefundPgExecutedBy")
+  reviewCasesAssigned ReviewCase[]     @relation("ReviewCaseAssignedTo")
+  reviewCasesResolved ReviewCase[]     @relation("ReviewCaseResolvedBy")
+
+  @@unique([email], map: "admins_email_uq")
+  @@map("admins")
+}
+
+model AdminSession {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminId           String    @map("admin_id") @db.Uuid
+  tokenHash         String    @map("token_hash") @db.VarChar(255)
+  status            String    @db.VarChar(20) // CHECK: ACTIVE | REVOKED | EXPIRED
+  idleExpiresAt     DateTime  @map("idle_expires_at") @db.Timestamptz(6)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
+  mfaVerifiedAt     DateTime? @map("mfa_verified_at") @db.Timestamptz(6)
+  ipAddress         String?   @map("ip_address") @db.Inet
+  userAgent         String?   @map("user_agent")
+  lastUsedAt        DateTime? @map("last_used_at") @db.Timestamptz(6)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  admin Admin @relation(fields: [adminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "admin_sessions_admin_fk")
+
+  @@unique([tokenHash], map: "admin_sessions_token_hash_uq")
+  @@index([adminId, status], map: "admin_sessions_admin_status_idx")
+  @@map("admin_sessions")
+}
+
+model AdminAuditLog {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminId      String?  @map("admin_id") @db.Uuid
+  action       String   @db.VarChar(100)
+  targetType   String   @map("target_type") @db.VarChar(50)
+  targetId     String?  @map("target_id") @db.Uuid
+  beforeData   Json?    @map("before_data")
+  afterData    Json?    @map("after_data")
+  evidenceNote String?  @map("evidence_note")
+  ipAddress    String?  @map("ip_address") @db.Inet
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  admin Admin? @relation(fields: [adminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "admin_audit_logs_admin_fk")
+
+  @@index([adminId, createdAt], map: "admin_audit_logs_admin_created_idx")
+  @@index([targetType, targetId], map: "admin_audit_logs_target_idx")
+  @@map("admin_audit_logs")
+}
+
+// ───────────────────────────── 운영·외부 연동 (§10) ─────────────────────────────
+
+model ReviewCase {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  caseType          String    @map("case_type") @db.VarChar(40) // CHECK: 13 values (DATABASE.md §10.1)
+  severity          String    @db.VarChar(10) // CHECK: INFO | WARN | CRITICAL
+  status            String    @db.VarChar(20) // CHECK: OPEN | IN_PROGRESS | RESOLVED
+  orderId           String?   @map("order_id") @db.Uuid
+  paymentId         String?   @map("payment_id") @db.Uuid
+  refundId          String?   @map("refund_id") @db.Uuid
+  dedupeKey         String    @map("dedupe_key") @db.VarChar(255)
+  detail            Json?
+  assignedAdminId   String?   @map("assigned_admin_id") @db.Uuid
+  resolvedByAdminId String?   @map("resolved_by_admin_id") @db.Uuid
+  resolutionAction  String?   @map("resolution_action") @db.VarChar(50)
+  resolutionNote    String?   @map("resolution_note")
+  resolvedAt        DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  order           Order?   @relation(fields: [orderId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "review_cases_order_fk")
+  payment         Payment? @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "review_cases_payment_fk")
+  refund          Refund?  @relation(fields: [refundId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "review_cases_refund_fk")
+  assignedAdmin   Admin?   @relation("ReviewCaseAssignedTo", fields: [assignedAdminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "review_cases_assigned_admin_fk")
+  resolvedByAdmin Admin?   @relation("ReviewCaseResolvedBy", fields: [resolvedByAdminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "review_cases_resolved_by_fk")
+
+  // + partial unique (case_type, dedupe_key) WHERE status <> 'RESOLVED' in raw SQL
+  @@map("review_cases")
+}
+
+/// Loosely coupled to domain tables on purpose (aggregate_type + aggregate_id, no FK; DATABASE.md §3.2).
+model OutboxEvent {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventType        String    @map("event_type") @db.VarChar(100)
+  aggregateType    String    @map("aggregate_type") @db.VarChar(50)
+  aggregateId      String    @map("aggregate_id") @db.Uuid
+  aggregateVersion BigInt    @map("aggregate_version")
+  payload          Json
+  status           String    @db.VarChar(20) // CHECK: PENDING | PROCESSING | SENT | RETRY | DEAD | SUPERSEDED
+  attemptCount     Int       @default(0) @map("attempt_count")
+  nextRetryAt      DateTime? @map("next_retry_at") @db.Timestamptz(6)
+  lockedUntil      DateTime? @map("locked_until") @db.Timestamptz(6)
+  lockedBy         String?   @map("locked_by") @db.VarChar(100)
+  lastError        String?   @map("last_error")
+  sentAt           DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([status, nextRetryAt], map: "outbox_events_status_next_retry_idx")
+  @@index([aggregateType, aggregateId, aggregateVersion], map: "outbox_events_aggregate_idx")
+  @@map("outbox_events")
+}

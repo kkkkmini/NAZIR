@@ -42,3 +42,6 @@ next-env.d.ts
 
 # allow the committed example file
 !.env.example
+
+# prisma generated client (created by `prisma generate`, runs on postinstall)
+/src/generated/
