@@ -15,6 +15,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../src/generated/prisma/client";
 import { assertDevSeedAllowed, SeedNotAllowedError } from "../src/server/db/seed-guard";
 import { DatabaseConfigError } from "../src/server/config/database-config";
+import { buildPgPoolConfig } from "../src/server/db/pg-adapter";
 
 /** Deterministic UUID (v5-shaped) so reruns hit the same primary keys. */
 function detUuid(key: string): string {
@@ -68,7 +69,9 @@ function buildSeats() {
 
 async function main() {
   const { runtimeEnv, database } = assertDevSeedAllowed(process.env);
-  const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
+  // Same driver configuration as the app (session TimeZone=UTC, src/server/db/pg-adapter.ts): without it the adapter
+  // would store every DateTime 9 hours early on a database whose default TimeZone is not UTC (TEST_PLAN §2.3 S11).
+  const prisma = new PrismaClient({ adapter: new PrismaPg(buildPgPoolConfig(process.env.DATABASE_URL)) });
   try {
     const day = 24 * 60 * 60 * 1000;
     const base = Date.now() + 30 * day;

@@ -78,7 +78,13 @@
 | `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(38개, DB 불필요, `npm test`). `isSameDatabase`(loopback 표기·포트·서버 비교)도 여기서 검증 |
 | `tests/unit/payment-method.test.ts` | A-039 서비스 규칙의 순수 함수 시험(DB 불필요, `npm test`): 생성 시 요청값 기록, 승인 시 요청값 불변, `DISALLOWED`→`OTHER`+원문, 원문 안전 검사 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
-| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
+| `tests/contract/schema/db-clock.test.ts` | **DB-03**(Step 3): `DbClock`(`getAppClock()`)이 실제 DB의 `now()`를 반환, 세션 `TimeZone=Asia/Seoul`(`SET LOCAL`)에서도 같은 순간 — 시계 자체의 시간대 독립성(§2.3 S11), 트랜잭션 클라이언트에 묶으면 트랜잭션 시작 시각 하나, 트랜잭션 밖에서는 증가, 연결 실패는 그대로 전파(시스템 시각 대체 없음) |
+| `tests/contract/schema/timezone.test.ts` | **TZ-01~05**(Step 3, §2.3 S11): 서울 기본 시간대 DB에서 앱 연결의 UTC 고정·연결별 적용·DateTime 왕복·`DbClock` 일치·판매 상태 |
+| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사. **SEED-05**(Step 3, S11): DB 기본 시간대 `Asia/Seoul`에서 실제 `prisma db seed`로 넣은 회차 시각이 실행 시각+30일 범위 안(epoch 기준), 일정 간격·인원 불변 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
+| `tests/unit/db-clock.test.ts` | **CLK-01**(Step 3): `DbClock` 계약(가짜 executor, DB 불필요): epoch ms 해석, 매 호출 새 `Date`, DB 오류 그대로 전파, 행 수·형식·범위 이상 시 `DbClockError`, `FixedClock`과 교체 가능 |
+| `tests/unit/sales-status.test.ts` | **CAT-01~06·08**(Step 3, §2.4) |
+| `tests/unit/seat-display.test.ts` | **CAT-07**(Step 3, §2.4): §11.1 좌석 표시 상태 |
+| `tests/unit/pg-adapter.test.ts` | **TZ-06**(Step 3): `buildPgPoolConfig()` (DB 불필요) |
 | `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) |
 
 필수 제약 목록(단일 정본)은 `tests/contract/schema/manifest.ts`다. 새 제약·테이블을 추가하면 여기에도 추가한다. MIG-06은 이후 migration이 manifest의 객체를 DROP하거나(`DROP INDEX/CONSTRAINT/TRIGGER/FUNCTION`), 그 객체가 의존하는 컬럼·테이블을 DROP하면 실패한다(정당한 CHECK 어휘 확장의 `DROP`+`ADD`도 현재는 위반으로 판정한다 — S8로 개선 예정). 롤백 트랜잭션 헬퍼 `rolledBack`은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 실패한다.
@@ -206,6 +212,53 @@ SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검
 | S8 | MIG-06 검사기 개선: 같은 migration에서 같은 이름으로 다시 만드는 `DROP`+`ADD`(CHECK 어휘 확장)는 허용하되 진짜 제거는 계속 검출 | 별도 테스트 개선 | `findProtectedDrops` 합성 케이스 확장 |
 | S9 | `lock_timeout`·`statement_timeout`·`idle_in_transaction_session_timeout`(현재 0), TLS 강제, 앱 DB 역할 분리(원장 UPDATE/DELETE/TRUNCATE 권한 제거) | Step 10 | 인프라 검증·리허설 |
 | S10 | partial unique를 대상으로 한 `INSERT … ON CONFLICT`는 인덱스 predicate를 그대로 명시해야 한다 | Step 5 | 해당 쿼리의 통합 테스트 |
+
+### 2.3 Step 3 착수 중 발견한 DB 점검 (S11)
+
+`tests/contract/schema/timezone.test.ts`는 자기 DB에 `ALTER DATABASE … SET timezone = 'Asia/Seoul'`을 걸어 **모든 새 연결이 서울 시간대로 시작**하게 한 뒤, 테스트 쪽 세션 설정 없이 앱 경로(`getPrisma()`·`getAppClock()`)로 검증한다. 기준값은 세션과 무관한 epoch 밀리초다.
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| TZ-01 | 환경·음성 대조: 일반 새 연결의 `TimeZone`, 수정 전 어댑터의 쓰기·읽기, 연결 문자열 `options`의 덮어쓰기 | `Asia/Seoul`; 수정 전 어댑터는 쓰기 −9h·읽기 +9h(자기 왕복은 같음); URL `options`가 설정 객체를 이김 |
+| TZ-02 | 앱 연결의 세션 시간대: 단일 연결, 동시에 연 연결 5개(서로 다른 backend pid), pool을 닫고 다시 만든 뒤의 새 연결, `options=`가 있는 `DATABASE_URL` | 모두 `UTC`; URL은 거부 |
+| TZ-03 | DateTime 쓰기·읽기 왕복: 모델 쓰기 → 모델·raw·트랜잭션 읽기·저장 epoch, 날짜 경계(KST 자정), DateTime 필터, SQL로 쓴 마이크로초·`+09` 리터럴 | 모두 같은 순간(밀리초로 절삭) |
+| TZ-04 | 같은 트랜잭션에서 SQL `now()`로 쓴 값의 모델 읽기 = `DbClock(tx).now()`, 앱 시계 = 서버 epoch | 일치 |
+| TZ-05 | SQL `now()` 기준으로 만든 시작된 회차·시작 전 회차·마감 지난 공연을 앱으로 읽어 판매 상태 계산(음성 대조: 수정 전 어댑터) | `CLOSED`·`ON_SALE`·`CLOSED`(수정 전: `UPCOMING`·`ON_SALE`로 틀림) |
+| TZ-06 | `buildPgPoolConfig()` 단위: UTC `options`, 앞뒤 공백·개행은 잘라 내고 **검사한 문자열 그대로** `pg`에 전달(그 밖은 불변), `options` 키(대소문자·빈 값·공백 뒤) 거부, 비밀번호 비노출 | — |
+
+**뮤테이션(2026-11-20):** seed를 공통 설정 없이 되돌리면 SEED-05가 실패한다(저장 시각 약 9시간 이름). `options`를 제거하면 TZ-02(3개)·TZ-03(2개)·TZ-04(1개)·TZ-05(1개) 7개가 실패하고, 수정과 무관한 대조·epoch·URL 거부 5개만 통과한다.
+
+
+| 항목 | 내용 | 반영 | 테스트 |
+|---|---|---|---|
+| S11 | Prisma 7 + `@prisma/adapter-pg` 7.10.1은 세션 `TimeZone`을 UTC로 가정한다. 읽기는 받은 오프셋을 `+00:00`으로 바꾸고, 쓰기는 오프셋 없는 UTC 문자열을 보낸다. 세션이 `Asia/Seoul`이면 **쓰기 9시간 이르게, 읽기 9시간 늦게**(모델·raw 모두) — 앱끼리 왕복은 같아 보여 드러나지 않는다(2026-11-20 실측). **해결(2026-11-20):** 앱의 모든 pool 연결을 `pg` `options`(`-c TimeZone=UTC`) 시작 파라미터로 시작, `options=`가 있는 `DATABASE_URL`은 거부(DATABASE §19.12). seed 연결도 같은 설정 사용(2026-11-20). 남은 확인: 트랜잭션 모드 풀러의 `options` 처리(E-007) | Step 3 | TZ-01~06, DB-03, SEED-05 |
+
+### 2.4 Step 3 카탈로그 — 표시용 판매 상태 (CAT)
+
+`src/server/catalog/sales-status.ts`·`seat-display.ts`의 순수 함수. 판단 근거는 DATABASE §11.11(반열린 판매 기간, `starts_at > now`)과 §11.1(좌석 표시 상태). 표시용이며 주문 생성(Step 5)이 잠금 아래 다시 판단한다.
+
+- **승인 대기:** 비판매 사유 간 우선순위(`NOT_PUBLIC` > `CANCELED` > `CLOSED` > `PAUSED` > `UPCOMING` > 좌석 상태)와 `CLOSED` 공연의 공개 목록 노출 여부는 Step 3 조사 보고의 제안이며 **사용자 승인 대기**다.
+- **확정(사용자 결정 2026-11-21) — 좌석 유무 표시:**
+
+  | 내부 상태 | 화면 문구 | 판정 (§11.11 충족 시) |
+  |---|---|---|
+  | `ON_SALE` | 예매 가능 | §11.1 `AVAILABLE` 좌석 1석 이상 |
+  | `TEMPORARILY_UNAVAILABLE` | 일시 품절 | `AVAILABLE` 0석, **유효한** 임시 점유(`HELD`: `CONFIRMING`, 또는 `ACTIVE` + 주문 `hold_expires_at > now`) 1석 이상. 만료된 `ACTIVE` hold는 `AVAILABLE`로 센다 |
+  | `SOLD_OUT` | 매진 | `AVAILABLE` 0석, `HELD` 0석 |
+
+  상세 화면 안내 문구(UI 구현 시 사용, 일시 품절·임시 점유 좌석): **"다른 고객의 결제가 진행 중인 좌석입니다. 잠시 후 다시 확인해 주세요."**
+- **미결정 — `BLOCKED`만 남은 회차:** `BLOCKED`는 관리자가 차단·해제할 수 있는 상태이며(§5.5), 환불 좌석도 재판매 전 `BLOCKED`로 두는 안이 권장안이다(Q-012, 미확정). 따라서 "남은 좌석이 모두 `BLOCKED`"는 영구 매진이 아닐 수 있다. 현재 구현은 `AVAILABLE`·`HELD`가 0이면 `BLOCKED` 수와 무관하게 `SOLD_OUT`(좌석이 하나도 없는 회차 포함)이며, CAT-08이 **현재 동작만** 고정한다. `매진` 유지 / 별도 상태(예: 판매 준비 중) / 좌석 0석 회차 처리를 사용자가 결정한다.
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| CAT-01 | 판매 오픈 1ms 전·정각·1ms 후, 마감 1ms 전·정각·1ms 후, 시작 1ms 전·정각, 시작이 마감보다 이른 회차, 마감 = 시작 | 오픈 전 `UPCOMING`, 오픈 정각부터 `ON_SALE`, 마감 정각·시작 정각부터 `CLOSED` |
+| CAT-02 | 판매 기간 NULL(양쪽·한쪽) | NULL은 제한 없음, 시작 시각이 마감 |
+| CAT-03 | `DRAFT` 공연, `CLOSED` 공연, `CLOSED`·`PAUSED`·`CANCELED` 회차와 그 조합 | `NOT_PUBLIC`(공개 API 404), `CLOSED`, `PAUSED`, `CANCELED` — 우선순위대로 |
+| CAT-04 | 예매 가능 좌석 0/1, 유효 점유 0/1/다수, 판매 전·중지·마감·시작 후의 점유 좌석 | `ON_SALE` / `TEMPORARILY_UNAVAILABLE` / `SOLD_OUT`, 판매 기간 밖은 기존 사유 우선, `ON_SALE`만 판매 가능 |
+| CAT-05 | 공연 상태 × 회차 상태 × 판매 기간(역전 포함) × 시각 × 예매 가능 0/1 × 점유 0/1 전체 조합 | `ON_SALE` ⇔ §11.11 ∧ 예매 가능 ≥ 1, `TEMPORARILY_UNAVAILABLE` ⇔ §11.11 ∧ 예매 가능 0 ∧ 점유 ≥ 1, `SOLD_OUT` ⇔ §11.11 ∧ 둘 다 0 |
+| CAT-06 | 미지 상태값, 잘못된 날짜, 음수·소수·NaN·누락 좌석 수 | `SalesStatusInputError`(추정하지 않음), 입력 불변 |
+| CAT-07 | §11.1 좌석 표시: `SOLD`·`BLOCKED`·`CONFIRMING`(만료 시각과 무관)·`ACTIVE` 만료 1ms 전/정각/1ms 후·종료된 hold·여러 hold·미지 상태값 | 정각부터 `AVAILABLE`, 종료 hold는 무시, `SOLD`·`BLOCKED`가 hold보다 우선, 미지 값은 `SeatDisplayInputError` |
+| CAT-08 | 좌석 행 → `countSeatDisplay` → 판매 상태: 유효 점유·`CONFIRMING`·만료(1ms 전, 정각) 점유, `SOLD` + 남은 좌석 `BLOCKED`, 좌석 0석 | 만료 점유만 남으면 `ON_SALE`(일시 품절 아님). `BLOCKED`만 남거나 0석이면 **현재** `SOLD_OUT`(정책 미결정) |
 
 ## 3. P0 좌석/점유
 
@@ -536,3 +589,6 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.5 | 2026-11-18 | MIG-19 보강: 미승인 결제의 `method_type` = 요청값(CHECK `payments_unapproved_method_matches_request_ck`), `ledger-claims.test.ts` 35→74개, 뮤테이션 M1~M6 결과(§2.1.1). 기존 시나리오 정의는 변경 없음 |
 | 1.2.6 | 2026-11-18 | MIG-22(승인 증거 불변)·MIG-23(환불 핵심 불변·`SEAT` 합계)·MIG-24(Prisma CLI 환경 가드) 신설, 테스트 파일 `ledger-evidence.test.ts`·`cli-guard.test.ts`·`prisma-cli-guard.test.ts` 대응, 뮤테이션 시험(§2.1.2), SEED-03 대상 DB 조정·SEED-03b 추가, 기존 시나리오 정의 변경 1건(S3 `SUCCEEDED` 강등은 이제 문장 시점에 거부). |
 | 1.2.7 | 2026-11-18 | MIG-24 보강: `SHADOW_DATABASE_URL` 환경 규칙·주 DB와 같은 DB 거부·미설정 시 기존 동작·거부 시 Shadow DB 불변(sentinel), `cli-guard.test.ts` 20→32개·`prisma-cli-guard.test.ts` 16→38개, 뮤테이션 SH1~SH12(§2.1.2). 기존 단언 변경 1건: "Shadow는 검사하지 않고 그대로 전달"을 새 요구에 맞게 교체. |
+| 1.2.8 | 2026-11-20 | Step 3 1차 작업: CAT-01~06(§2.4, 표시용 판매 상태), CLK-01·DB-03(`DbClock`), S11(§2.3, `timestamptz`의 세션 TimeZone 해석 문제, 결정 대기) 추가, 테스트 파일 대응 추가. 기존 시나리오 정의는 변경 없음 |
+| 1.2.9 | 2026-11-20 | S11 해결 반영: TZ-01~06·SEED-05 신설(§2.3), 테스트 파일 대응·뮤테이션 결과 추가. 기존 시나리오 정의는 변경 없음 |
+| 1.2.10 | 2026-11-21 | 1차 리뷰 반영: `TEMPORARILY_UNAVAILABLE`(일시 품절) 확정 표시와 안내 문구, CAT-04~06 갱신·CAT-07·08 신설, `BLOCKED`만 남은 회차 정책 미결정 기록, TZ-06 공백 처리. 우선순위·`CLOSED` 공연 노출은 승인 대기 유지 |

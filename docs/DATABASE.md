@@ -1357,6 +1357,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.5 | 2026-11-18 | Step 2 최종 보완: CHECK `payments_unapproved_method_matches_request_ck`(`status = 'SUCCEEDED' OR method_type = requested_method_type`) 추가(A-039 보강, §7.1·§13.3·§14·§19). 기존 제약·A-039 구조는 변경 없음. A-001~A-037, D-001~D-015 변경 없음 |
 | 1.2.6 | 2026-11-18 | PR #2 기술 리뷰 후속(A-042): `SUCCEEDED` 결제의 승인 증거 불변 트리거(§7.1 컬럼 분류표), `refunds` 핵심 필드 불변 트리거와 `SEAT` 환불 합계 지연 constraint trigger 2개(§7.4), Prisma CLI 환경 가드(§14.1). §7.5·§13.3·§14·§19 갱신, §19.8의 "승인 후 UPDATE 가능" 서술 정정. A-041의 refunds UPDATE 허용과 A-001~A-037, D-001~D-015는 변경 없음 |
 | 1.2.7 | 2026-11-18 | Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사(A-042 보강, §14.1): 환경 규칙(`test` ⇔ `_test`) 동일 적용, 주 DB와 같은 DB 거부, 미설정 시 기존 동작. 다른 항목 변경 없음 |
+| 1.2.8 | 2026-11-20 | Step 3: `timestamptz` 세션 시간대 해석 문제(S11) 실측(§19.5)과 앱·트랜잭션·seed 연결의 `TimeZone=UTC` 고정(§19.12). 스키마·migration·seed 데이터 변경 없음 |
 
 ---
 
@@ -1453,6 +1454,7 @@ Prisma 7.10.1을 **실측**한 결과(`prisma migrate diff`, 실제 CLI·실제 
 | 스키마에 선언한 복합 FK(자기 PK를 일부로 쓰는 순환 FK 포함) | 정상 | **모든 FK를 Prisma에 선언**. raw SQL로만 만든 FK는 없음 |
 | **migration 실행** | **트랜잭션 없이 실행한다.** 중간 문장이 실패하면 앞 문장이 DB에 남고 migration은 실패로 기록되어 이후 `migrate deploy`가 `P3009`로 막힌다. `migrate status`는 종료 코드 1이지만 "failed" 문구를 항상 출력하지는 않는다. | 모든 migration을 `BEGIN; … COMMIT;`으로 감싼다(A-037). 실패 주입 실측: 래핑하면 객체가 하나도 남지 않고, 래핑이 없으면 27개 테이블이 남는다 |
 | **`created_at`/`updated_at` 기록 주체** | Prisma Client는 INSERT에 `created_at`·`updated_at`을 **애플리케이션 시각으로 명시 전송**하고, UPDATE에는 `updated_at`을 명시한다. 따라서 Client 쓰기에는 DB 기본값이 쓰이지 않는다. raw SQL이 생략하면 DB 기본값 `CURRENT_TIMESTAMP`(= **트랜잭션 시작 시각**)가 들어가고, raw UPDATE는 `updated_at`을 건드리지 않는다(트리거 없음) | D3·Q-026: 현행 유지. raw SQL UPDATE는 `updated_at`을 명시 갱신한다. 테스트 DB-02가 이 사실을 고정한다(Prisma 업그레이드 시 변하면 실패) |
+| **`timestamptz` 해석(2026-11-20 실측, S11)** | `@prisma/adapter-pg` 7.10.1은 세션 `TimeZone`이 **UTC라고 가정**한다. 읽기: PostgreSQL이 보낸 오프셋(`+09`)을 `+00:00`으로 **바꿔 붙인다**(`normalize_timestamptz`). 쓰기: `Date`를 UTC 벽시계 문자열로 **오프셋 없이** 보내 PostgreSQL이 세션 시간대로 해석한다. 세션이 `Asia/Seoul`이면 쓰기는 9시간 이르게 저장되고 읽기는 9시간 늦게 나와 **앱끼리의 왕복은 같아 보이지만 저장된 순간과 SQL `now()` 비교가 틀린다** | 앱의 모든 연결을 세션 `TimeZone=UTC`로 시작(§19.12) |
 | Prisma가 위장하는 오류 코드 | 트리거 오류 `23001`이 **`P2003`(FK 위반)** 으로 나온다. 제약 이름은 `meta.driverAdapterError.cause.constraint.index`에 있고 원래 SQLSTATE는 `cause.originalCode`에 있다 | Step 5 전 오류 매핑에서 `originalCode` + 제약 이름 기준으로 변환(S7) |
 
 추가 차이:
@@ -1568,3 +1570,12 @@ npm run test:db
 - `npm run db:seed` 후 `dev-seed-musical` 공연으로 UI를 개발할 수 있다(임시 데이터).
 - 쓰기 경로(Step 5 이후)는 반드시 raw query + 명시적 READ COMMITTED + §13.2 잠금 순서를 따르고, `updated_at`을 직접 갱신한다. 제약 이름은 `DB_CONSTRAINT`로 도메인 오류에 매핑하되 Prisma 오류의 `meta.driverAdapterError.cause`를 기준으로 한다(S7).
 - Step 3 착수 전 사용자 결정 필요: 없음(D1~D8 확정). Step 5 전: Q-025 세부 형식.
+
+### 19.12 Step 3: 앱 DB 연결의 세션 시간대 고정 (S11, 2026-11-20)
+
+- **원인:** §19.5 `timestamptz` 해석 행. 위험은 DB 공급자·DB·역할의 기본 `TimeZone`이 UTC가 아닐 때만 드러나며, 그때는 판매 기간·회차 시작·점유 만료(`hold_expires_at`)·결제 보호 시각 등 모든 시각 판단과 저장값이 9시간 어긋난다. 기존 테스트·CI 서버는 UTC라 드러나지 않았다.
+- **조치:** `src/server/db/pg-adapter.ts`의 `buildPgPoolConfig()`가 `pg` 8.23.1의 공식 `ClientConfig.options`(libpq `options` 시작 파라미터)에 `-c TimeZone=UTC`를 넣는다. `pg`는 이 값을 **pool이 여는 모든 연결의 startup packet**에 실으므로, 연결마다 첫 쿼리 전에 적용되고 새로 생기는 연결에도 빠지지 않는다(연결 하나에 `SET`을 하는 방식이 아님). 이 설정을 쓰는 연결 경로: ① 앱 `getPrisma()`(`src/server/db/client.ts`), ② 그 클라이언트의 interactive transaction(같은 pool의 연결을 쓴다), ③ 개발 seed(`prisma/seed.ts`, 2026-11-20 적용). 세 경로 모두 `buildPgPoolConfig()` 하나를 공유하며 시간대 설정을 따로 두지 않는다. 환경별 DB 검사(`assertDatabaseMatchesEnv`)는 그대로 먼저 실행된다.
+- **연결 문자열 보호:** `pg`는 연결 문자열 값을 설정 객체 **위에** 덮어쓴다. `DATABASE_URL`에 `options=`가 있으면 UTC 고정이 조용히 무시되므로(TZ-01 실측), 그런 URL은 수정하지 않고 **거부**한다(`DatabaseConfigError`).
+- **규칙:** 앱 코드는 `SET [LOCAL] TIME ZONE`을 쓰지 않는다. `DbClock`은 epoch 밀리초로 읽어 세션 시간대와 무관하다(이중 방어).
+- **검증:** TEST_PLAN TZ-01~06. DB 기본 `timezone`을 `Asia/Seoul`로 둔 실제 PostgreSQL에서 앱 경로(`getPrisma()`·`getAppClock()`)로 확인하고, 수정을 제거하면 7개 테스트가 실패함을 확인했다(뮤테이션).
+- **남은 확인:** 트랜잭션 모드 커넥션 풀러(PgBouncer, 호스팅 공급자 pooler)가 `options` 시작 파라미터를 전달·거부·무시하는지는 미검증이다(E-007, §19.10-5). 배포 대상 DB가 정해지면 `SELECT current_setting('TimeZone')`이 `UTC`인지 실제 연결로 확인한다.

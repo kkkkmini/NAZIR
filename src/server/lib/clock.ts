@@ -1,9 +1,9 @@
 /**
  * Clock abstraction (DATABASE.md §1.2, A-023).
  *
- * Expiry and payment-protection decisions use DB time in production. The DB-backed
- * clock is added with the database layer (Step 2); until then services depend only
- * on this interface so tests can inject a fixed time.
+ * Expiry and payment-protection decisions use DB time in production: `DbClock`
+ * (src/server/db/db-clock.ts, factory `getAppClock()` in src/server/db/app-clock.ts).
+ * Services depend only on this interface so tests can inject a fixed time.
  */
 export interface Clock {
   now(): Promise<Date>;

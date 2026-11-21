@@ -52,6 +52,36 @@ describe("seed", () => {
     expect({ counts: await counts(), h: await fingerprint() }).toEqual(before);
   });
 
+  it("SEED-05 stores the right session instants on a database whose default TimeZone is Asia/Seoul (TEST_PLAN §2.3 S11)", async () => {
+    // Every new connection to this database — including the seed process's own — starts in Seoul unless the client
+    // pins its session to UTC. The seed computes its schedule from Date.now(), so the run is bracketed by wall-clock
+    // readings and the stored instants are read back as session-independent epoch milliseconds.
+    await db.query(`ALTER DATABASE "${db.name}" SET timezone TO 'Asia/Seoul'`);
+    const DAY = 24 * 60 * 60 * 1000;
+    const THREE_HOURS = 3 * 60 * 60 * 1000;
+
+    const t0 = Date.now();
+    const res = await seed({ NAZIR_RUNTIME_ENV: "test" });
+    const t1 = Date.now();
+    expect(res.code, `${res.stdout}\n${res.stderr}`).toBe(0);
+
+    const { rows } = await db.query<{ starts: string; ends: string }>(`
+      SELECT floor(extract(epoch FROM starts_at) * 1000)::bigint::text AS starts,
+             floor(extract(epoch FROM ends_at) * 1000)::bigint::text AS ends
+        FROM show_sessions ORDER BY starts_at`);
+    expect(rows).toHaveLength(2);
+    const [s1, s2] = rows.map((r) => ({ starts: Number(r.starts), ends: Number(r.ends) }));
+    // session 1 = run time + 30 days (a 9-hour shift would fall far outside this window)
+    expect(s1.starts).toBeGreaterThanOrEqual(t0 + 30 * DAY);
+    expect(s1.starts).toBeLessThanOrEqual(t1 + 30 * DAY);
+    // the rest of the schedule is unchanged: next day, 3-hour sessions
+    expect(s2.starts - s1.starts).toBe(DAY);
+    expect(s1.ends - s1.starts).toBe(THREE_HOURS);
+    expect(s2.ends - s2.starts).toBe(THREE_HOURS);
+    // data is otherwise identical to SEED-01
+    expect(await counts()).toEqual({ venues: 1, shows: 1, sessions: 2, seats: 78, session_seats: 156 });
+  });
+
   it.each([
     ["production", "production"],
     ["missing NAZIR_RUNTIME_ENV (fail-closed => production)", ""],
