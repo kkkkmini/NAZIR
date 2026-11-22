@@ -124,11 +124,11 @@ function IdentityComplete(props: Props & { purpose: IdentityPurpose | null }) {
           조회 전용 인증입니다. 결제를 기다리는 예매를 결제하거나 취소하려면 예매용 본인인증이 필요합니다.
         </p>
         <div className="flex flex-col gap-2">
-          <Link href="/orders" className={primary + " sm:self-start"} data-action="to-orders">
+          <Link href="/orders?preview=list" className={primary + " sm:self-start"} data-action="to-orders">
             내 예매 목록으로 이동
             {devTag}
           </Link>
-          <p className="text-xs text-char-3">[DEV] 내 예매 목록(A4-2)은 아직 준비 중이라, 이동하면 예매 확인 인증 화면이 다시 표시됩니다.</p>
+          <p className="text-xs text-char-3">[DEV] 고정 샘플로 만든 내 예매 목록 미리보기로 이동합니다.</p>
         </div>
       </Result>
     );
