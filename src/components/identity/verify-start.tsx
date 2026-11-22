@@ -6,6 +6,7 @@ import { SessionInfo, useSelectedSession } from "@/components/booking/session-in
 import { fullFmt } from "@/components/booking/format";
 import type { BookingSessionView } from "@/server/booking/session-types";
 import type { IdentityStartMode } from "@/server/identity/identity-start-mode";
+import { saveStartedPurpose } from "./identity-purpose";
 import {
   CALLBACK_LABEL,
   PREVIEW_CALLBACK_RESULTS,
@@ -66,12 +67,14 @@ export function VerifyStart({
   function start() {
     if (!dev || !hasSession) return;
     setView("starting");
+    // 실패 시 A7이 이 화면으로 되돌려 보내기 위한 표시용 값(권한 판단에 쓰지 않음).
+    saveStartedPurpose("BOOKING");
     // [DEV] 서버 응답 대신 미리보기 선택값으로 상태를 보여준다.
     timer.current = window.setTimeout(() => {
       timer.current = null;
       if (startResult === "provider-unavailable") return setView("error-provider");
       if (startResult === "rate-limited") return setView("error-rate");
-      router.push(`/identity/complete?vid=${PREVIEW_VID}&result=${callbackResult}`);
+      router.push(`/identity/complete?vid=${PREVIEW_VID}&result=${callbackResult}&purpose=BOOKING`);
     }, 700);
   }
 
