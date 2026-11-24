@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { luminaArtHall } from "@/content/venue";
 
 /**
  * 모바일·태블릿 하단 고정 예매 바. 상단 예매 영역(targetId)이 화면에서 사라지면 나타난다.
@@ -29,7 +30,7 @@ export function FixedBookingBar({ targetId, title, cta }: { targetId: string; ti
       <div className="mx-auto flex max-w-[77.5rem] items-center gap-4 px-5 py-3 sm:px-8">
         <div className="min-w-0 flex-1">
           <p className="truncate text-[0.9375rem] font-bold text-char">{title}</p>
-          <p className="truncate text-xs text-char-3">공연 일정·장소 추후 공개</p>
+          <p className="truncate text-xs text-char-3">{luminaArtHall.name} · 공연 일정 추후 공개</p>
         </div>
         {cta}
       </div>

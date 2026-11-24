@@ -4,8 +4,11 @@
  * - 확정된 값만 넣는다. 확정되지 않은 값은 `null`로 두고 화면은 "추후 공개"로 표시한다.
  * - 공연 콘텐츠의 저장 위치와 응답 구조는 개발팀 확인 사항이다(docs/design/01_IA.md R-D).
  *   API가 정해지면 이 파일은 그 응답으로 대체한다.
+ * - 공연장 정보는 src/content/venue.ts에서 관리한다.
  * - 판매 상태·가격은 여기에 두지 않는다. 서버가 계산해 제공해야 한다(R-E).
  */
+
+import { luminaArtHall } from "./venue";
 
 export interface CreditEntry {
   role: string;
@@ -22,6 +25,7 @@ export interface ShowContent {
   posterUrl: string | null;
   /** 히어로 키 비주얼(가로형). 제작 예정. 없으면 타이틀 카드로 표시한다. */
   keyVisualUrl: string | null;
+  /** 공연장 표시명 (확정: src/content/venue.ts) */
   venue: string | null;
   period: string | null;
   runningTime: string | null;
@@ -40,7 +44,7 @@ export const nazir: ShowContent = {
   tagline: null,
   posterUrl: null,
   keyVisualUrl: null,
-  venue: null,
+  venue: luminaArtHall.name,
   period: null,
   runningTime: null,
   ageRating: null,
