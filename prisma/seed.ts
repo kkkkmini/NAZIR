@@ -7,6 +7,8 @@
  *
  * Safety: refuses to run unless NAZIR_RUNTIME_ENV is `local` or `test` (a missing value counts as
  * production) and the database name matches the environment. See src/server/db/seed-guard.ts.
+ * Connection: DATABASE_URL_UNPOOLED (direct) when set, otherwise DATABASE_URL, with the app's driver settings
+ * (session TimeZone=UTC, src/server/db/pg-adapter.ts).
  *
  * Run:  npm run db:seed      (== prisma db seed)
  */
@@ -68,10 +70,11 @@ function buildSeats() {
 }
 
 async function main() {
-  const { runtimeEnv, database } = assertDevSeedAllowed(process.env);
+  // DATABASE_URL_UNPOOLED (direct) when set, otherwise DATABASE_URL — validated and selected by the seed guard.
+  const { runtimeEnv, database, variable, url } = assertDevSeedAllowed(process.env);
   // Same driver configuration as the app (session TimeZone=UTC, src/server/db/pg-adapter.ts): without it the adapter
   // would store every DateTime 9 hours early on a database whose default TimeZone is not UTC (TEST_PLAN §2.3 S11).
-  const prisma = new PrismaClient({ adapter: new PrismaPg(buildPgPoolConfig(process.env.DATABASE_URL)) });
+  const prisma = new PrismaClient({ adapter: new PrismaPg(buildPgPoolConfig(url, variable)) });
   try {
     const day = 24 * 60 * 60 * 1000;
     const base = Date.now() + 30 * day;
@@ -149,7 +152,7 @@ async function main() {
       prisma.sessionSeat.count({ where: { venueId: VENUE_ID } }),
     ]);
     console.log(
-      `[seed] ${runtimeEnv}/${database.database}: venues=${venues} shows=${shows} sessions=${sessions} seats=${physical} session_seats=${sellable} (DEV SEED, placeholder data)`,
+      `[seed] ${runtimeEnv}/${database.database} via ${variable}: venues=${venues} shows=${shows} sessions=${sessions} seats=${physical} session_seats=${sellable} (DEV SEED, placeholder data)`,
     );
   } finally {
     await prisma.$disconnect();

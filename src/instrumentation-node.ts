@@ -6,7 +6,7 @@
  */
 import {
   DatabaseConfigError,
-  assertDatabaseMatchesEnv,
+  assertRuntimeDatabaseConfig,
   describeDatabase,
 } from "./server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "./server/config/runtime-config";
@@ -14,11 +14,15 @@ import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "./server/
 try {
   const config = loadRuntimeConfig(process.env);
   console.info("[nazir] runtime config", JSON.stringify(describeRuntimeConfig(config)));
-  // Step 2: when a database is configured it must belong to this environment (dev vs test vs shared).
-  // DATABASE_URL is not required yet: nothing in the app reads the database before Step 3.
-  if (process.env.DATABASE_URL) {
-    const db = assertDatabaseMatchesEnv(config.runtimeEnv, process.env.DATABASE_URL);
-    console.info("[nazir] database", JSON.stringify(describeDatabase(db)));
+  // When a database is configured it must belong to this environment (dev vs test vs shared).
+  // DATABASE_URL is NOT required at startup: without it the server still starts, but every page and API that reads the
+  // catalog (Step 3) answers with an error. Whether staging/production must require it is undecided (review M3).
+  // The runtime connects with DATABASE_URL only (pooled). DATABASE_URL_UNPOOLED (direct, Prisma CLI + seed) is not used
+  // here, but alone it is refused (the app would have no database), and next to DATABASE_URL it must belong to this
+  // environment and be the same database.
+  const db = assertRuntimeDatabaseConfig(config.runtimeEnv, process.env);
+  if (db) {
+    console.info("[nazir] database", JSON.stringify(describeDatabase(db.pooled)));
   }
 } catch (e) {
   if (e instanceof ConfigError || e instanceof DatabaseConfigError) {

@@ -3,7 +3,10 @@
  *
  * - The CLI does not load .env files by itself in Prisma 7, so we load `.env.local`
  *   then `.env` here (values already present in the process environment win).
- * - `DATABASE_URL` is read lazily: commands that need no database (`generate`, `validate`)
+ * - The CLI connects with DATABASE_URL_UNPOOLED (direct connection, e.g. Neon's non-pooler host) when it is set, and
+ *   with DATABASE_URL otherwise — local development needs only DATABASE_URL. The app runtime always uses DATABASE_URL
+ *   (pooled); see src/server/db/client.ts.
+ * - The database URL is read lazily: commands that need no database (`generate`, `validate`)
  *   work without it. `migrate deploy` / `db seed` fail with a clear message when it is unset.
  * - When it (or SHADOW_DATABASE_URL) is set, it must match NAZIR_RUNTIME_ENV (src/server/config/prisma-cli-guard.ts): a `*_test` database only with
  *   NAZIR_RUNTIME_ENV=test, and never a non-test database with it. A missing/unknown NAZIR_RUNTIME_ENV counts as production.
@@ -18,12 +21,13 @@ for (const file of [".env.local", ".env"]) {
   if (existsSync(file)) process.loadEnvFile(file);
 }
 
-// Before any command runs: DATABASE_URL and SHADOW_DATABASE_URL must belong to NAZIR_RUNTIME_ENV (test <=> *_test; missing
-// env => production) and must not be the same database. Nothing happens when they are unset, so `prisma validate` /
-// `prisma generate` are unaffected.
-assertPrismaCliDatabase(process.env);
+// Before any command runs: DATABASE_URL, DATABASE_URL_UNPOOLED and SHADOW_DATABASE_URL must belong to NAZIR_RUNTIME_ENV
+// (test <=> *_test; missing env => production); the two main URLs must be the same database and the shadow must be a
+// different one. Nothing happens when they are unset, so `prisma validate` / `prisma generate` are unaffected.
+// The guard returns the URL it validated and selected; the CLI uses exactly that string.
+const cliDatabase = assertPrismaCliDatabase(process.env);
 
-const url = process.env.DATABASE_URL;
+const url = cliDatabase?.url;
 const shadowDatabaseUrl = process.env.SHADOW_DATABASE_URL;
 
 export default defineConfig({

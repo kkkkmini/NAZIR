@@ -217,3 +217,115 @@ describe("prisma.config.ts guards SHADOW_DATABASE_URL as well (real Prisma CLI)"
     expect(out(noShadow)).not.toMatch(/Prisma CLI refused/);
   });
 });
+
+// DB-05: DATABASE_URL (pooled, app runtime) / DATABASE_URL_UNPOOLED (direct, Prisma CLI). Both name the same database
+// here; one of them carries a WRONG password, so whichever URL the CLI really connects with decides the outcome.
+const WRONG_PW = "wrong-pw-db05";
+const withWrongPassword = (raw: string) => {
+  const u = new URL(raw);
+  u.password = WRONG_PW;
+  return u.toString();
+};
+
+describe("DB-05 the Prisma CLI connects with DATABASE_URL_UNPOOLED when it is set (real Prisma CLI)", () => {
+  it("control: DATABASE_URL with a wrong password alone cannot migrate (so the tests below are meaningful)", async () => {
+    const fresh = newThrowawayName("test");
+    await createDatabase(server, fresh);
+    try {
+      const res = await runPrisma(["migrate", "deploy"], { databaseUrl: withWrongPassword(server.urlFor(fresh)), env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(res.code).not.toBe(0);
+      expect(await tablesIn(fresh)).toBe(0);
+      expect(out(res)).not.toContain(WRONG_PW);
+    } finally {
+      await dropDatabase(server, fresh);
+    }
+  });
+
+  it("pooled URL broken, direct URL correct: `migrate deploy` succeeds, so the CLI used the direct URL", async () => {
+    const fresh = newThrowawayName("test");
+    await createDatabase(server, fresh);
+    try {
+      const res = await runPrisma(["migrate", "deploy"], {
+        databaseUrl: withWrongPassword(server.urlFor(fresh)),
+        unpooledUrl: server.urlFor(fresh),
+        env: { NAZIR_RUNTIME_ENV: "test" },
+      });
+      expect(res.code, out(res)).toBe(0);
+      expect(await tablesIn(fresh)).toBeGreaterThan(0);
+      expect(out(res)).not.toContain(WRONG_PW);
+    } finally {
+      await dropDatabase(server, fresh);
+    }
+  });
+
+  it("without DATABASE_URL_UNPOOLED, DATABASE_URL alone still migrates (local development unchanged)", async () => {
+    const fresh = newThrowawayName("test");
+    await createDatabase(server, fresh);
+    try {
+      const res = await runPrisma(["migrate", "deploy"], { databaseUrl: server.urlFor(fresh), env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(res.code, out(res)).toBe(0);
+      expect(await tablesIn(fresh)).toBeGreaterThan(0);
+    } finally {
+      await dropDatabase(server, fresh);
+    }
+  });
+
+  it("a direct URL naming ANOTHER database is refused before anything runs; neither database is touched", async () => {
+    const a = newThrowawayName("test");
+    const b = newThrowawayName("test");
+    await createDatabase(server, a);
+    await createDatabase(server, b);
+    try {
+      const res = await runPrisma(["migrate", "deploy"], { databaseUrl: server.urlFor(a), unpooledUrl: server.urlFor(b), env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(res.code).not.toBe(0);
+      expect(out(res)).toMatch(/DATABASE_URL_UNPOOLED and DATABASE_URL must name the same database/);
+      expect(await tablesIn(a)).toBe(0);
+      expect(await tablesIn(b)).toBe(0);
+    } finally {
+      await dropDatabase(server, a);
+      await dropDatabase(server, b);
+    }
+  });
+
+  it("a direct URL from another environment (a non-test database in a test run) is refused and not touched", async () => {
+    const t = newThrowawayName("test");
+    const d = newThrowawayName("dev");
+    await createDatabase(server, t);
+    await createDatabase(server, d);
+    try {
+      const res = await runPrisma(["migrate", "deploy"], { databaseUrl: server.urlFor(t), unpooledUrl: server.urlFor(d), env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(res.code).not.toBe(0);
+      expect(out(res)).toMatch(/DATABASE_URL_UNPOOLED: .*requires a database whose name ends with "_test"/);
+      expect(await tablesIn(d)).toBe(0);
+      expect(await tablesIn(t)).toBe(0);
+    } finally {
+      await dropDatabase(server, t);
+      await dropDatabase(server, d);
+    }
+  });
+
+  it("never prints either URL's password when it refuses (a unique marker password on both URLs)", async () => {
+    const a = newThrowawayName("test");
+    const d = newThrowawayName("dev");
+    await createDatabase(server, a);
+    await createDatabase(server, d);
+    try {
+      for (const [databaseUrl, unpooledUrl] of [
+        [server.urlFor(a), server.urlFor(d)], // environment violation on the direct URL
+        [server.urlFor(a), server.urlFor(d).replace(/_dev(\?|$)/, "_other_test$1")], // pair mismatch
+      ]) {
+        const res = await runPrisma(["migrate", "deploy"], {
+          databaseUrl: withWrongPassword(databaseUrl),
+          unpooledUrl: withWrongPassword(unpooledUrl),
+          env: { NAZIR_RUNTIME_ENV: "test" },
+        });
+        expect(res.code).not.toBe(0);
+        expect(out(res)).toMatch(/Prisma CLI refused before running any command/);
+        expect(out(res)).not.toContain(WRONG_PW);
+      }
+    } finally {
+      await dropDatabase(server, a);
+      await dropDatabase(server, d);
+    }
+  });
+});

@@ -11,6 +11,9 @@ import { buildPgPoolConfig } from "./pg-adapter";
  * The connection is validated against the runtime environment before it is created, so a test
  * database can never be used outside `NAZIR_RUNTIME_ENV=test` and vice versa.
  *
+ * Runtime connection = DATABASE_URL only (with Neon: the POOLED URL). DATABASE_URL_UNPOOLED (direct) is for the Prisma
+ * CLI and the seed (prisma.config.ts, src/server/db/seed-guard.ts) and is deliberately not used here.
+ *
  * Every pooled connection starts with session TimeZone=UTC (./pg-adapter.ts): the driver adapter reads timestamptz
  * correctly only under UTC (TEST_PLAN §2.3 S11). Do not `SET TIME ZONE` in application code.
  *

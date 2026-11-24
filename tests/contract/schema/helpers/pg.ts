@@ -118,10 +118,10 @@ export interface CliResult {
   stderr: string;
 }
 
-/** Runs the repository's Prisma CLI. DATABASE_URL is always set explicitly; ambient values are not trusted. */
+/** Runs the repository's Prisma CLI. DATABASE_URL is always set explicitly; ambient values (including SHADOW_DATABASE_URL and DATABASE_URL_UNPOOLED) are not trusted. */
 export function runPrisma(
   args: string[],
-  opts: { databaseUrl: string; shadowUrl?: string; env?: Record<string, string>; cwd?: string },
+  opts: { databaseUrl: string; unpooledUrl?: string; shadowUrl?: string; env?: Record<string, string>; cwd?: string },
 ): Promise<CliResult> {
   return new Promise((resolvePromise, reject) => {
     // NAZIR_RUNTIME_ENV defaults to `test` (throwaway databases are test databases) instead of whatever the shell has;
@@ -131,6 +131,9 @@ export function runPrisma(
     env.PATH = `${resolve(REPO_ROOT, "node_modules/.bin")}:${env.PATH ?? ""}`;
     if (opts.shadowUrl) env.SHADOW_DATABASE_URL = opts.shadowUrl;
     else delete env.SHADOW_DATABASE_URL;
+    // Same for the direct (Neon "unpooled") URL: never inherit an ambient value.
+    if (opts.unpooledUrl !== undefined) env.DATABASE_URL_UNPOOLED = opts.unpooledUrl;
+    else delete env.DATABASE_URL_UNPOOLED;
     const child = spawn(process.execPath, [PRISMA_BIN, ...args], { cwd: opts.cwd ?? REPO_ROOT, env });
     let stdout = "";
     let stderr = "";

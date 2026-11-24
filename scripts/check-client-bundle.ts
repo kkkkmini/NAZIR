@@ -9,7 +9,7 @@ import { join } from "node:path";
 const ROOT = join(process.cwd(), ".next", "static");
 const FORBIDDEN: { label: string; re: RegExp }[] = [
   { label: "Toss secret key", re: /\b(test|live)_g?sk_[A-Za-z0-9]+/ },
-  { label: "secret env var name", re: /\b(TOSS_SECRET_KEY|TOSS_SECURITY_KEY|NICE_CLIENT_SECRET|DATABASE_URL)\b/ },
+  { label: "secret env var name", re: /\b(TOSS_SECRET_KEY|TOSS_SECURITY_KEY|NICE_CLIENT_SECRET|DATABASE_URL|DATABASE_URL_UNPOOLED|SHADOW_DATABASE_URL)\b/ },
   { label: "mock provider marker", re: /NAZIR_MOCK_PROVIDER_MODULE/ },
 ];
 

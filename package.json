@@ -12,6 +12,7 @@
     "test:watch": "vitest",
     "test:db": "vitest run --config vitest.db.config.ts",
     "check:config": "tsx scripts/check-config.ts",
+    "verify:db-session": "tsx scripts/verify-db-session.ts",
     "check:bundle": "tsx scripts/check-client-bundle.ts",
     "check": "npm run lint && npm run typecheck && npm run test",
     "postinstall": "prisma generate",

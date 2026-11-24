@@ -141,4 +141,81 @@ describe("assertPrismaCliDatabase (prisma.config.ts guard)", () => {
       }
     }
   });
+
+  // DB-04: Neon pooled (DATABASE_URL) / direct (DATABASE_URL_UNPOOLED). Made-up host names, fake password.
+  describe("DATABASE_URL_UNPOOLED", () => {
+    const DIRECT = "postgresql://nazir:s3cret@ep-quiet-sun-a1b2c3d4.ap-southeast-1.aws.neon.tech/nazir_preview_test?sslmode=require";
+    const POOLED = "postgresql://nazir:s3cret@ep-quiet-sun-a1b2c3d4-pooler.ap-southeast-1.aws.neon.tech/nazir_preview_test?sslmode=require";
+
+    it("the CLI uses the direct URL when it is set, and validates the pooled one as well", () => {
+      expect(assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT })).toMatchObject({
+        variable: "DATABASE_URL_UNPOOLED",
+        url: DIRECT,
+        database: "nazir_preview_test",
+      });
+    });
+
+    it("DATABASE_URL alone keeps working exactly as before (local development)", () => {
+      expect(assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "local", DATABASE_URL: DEV })).toMatchObject({ variable: "DATABASE_URL", url: DEV, database: "nazir_dev" });
+      expect(assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "local", DATABASE_URL: DEV, DATABASE_URL_UNPOOLED: "" })).toMatchObject({ variable: "DATABASE_URL" });
+    });
+
+    it.each([
+      ["direct points at another database", { DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT.replace("nazir_preview_test", "nazir_other_test") }, /must name the same database/],
+      ["direct points at another endpoint", { DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT.replace("ep-quiet-sun-a1b2c3d4", "ep-other-moon-e5f6a7b8") }, /must name the same database/],
+      ["direct is a development database", { DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DEV }, /DATABASE_URL_UNPOOLED: .*requires a database whose name ends with "_test"/],
+      ["pooled is a development database", { DATABASE_URL: DEV, DATABASE_URL_UNPOOLED: DIRECT }, /DATABASE_URL: .*requires a database whose name ends with "_test"/],
+    ])("refuses in a test run when %s", (_label, env, message) => {
+      expect(() => assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", ...env })).toThrow(message);
+      expect(() => assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", ...env })).toThrow(/^Prisma CLI refused before running any command/);
+    });
+
+    it("a missing NAZIR_RUNTIME_ENV is production: a test direct URL is refused and says why", () => {
+      expect(() => assertPrismaCliDatabase({ DATABASE_URL: DEV, DATABASE_URL_UNPOOLED: TEST })).toThrow(
+        /DATABASE_URL_UNPOOLED: .*must not be used with NAZIR_RUNTIME_ENV=production.*production was assumed/,
+      );
+    });
+
+    it.each([
+      ["the direct URL", DIRECT, "DATABASE_URL"],
+      ["the pooled spelling of the main database", POOLED, "DATABASE_URL"],
+    ])("a shadow equal to %s is refused", (_label, shadow, variable) => {
+      expect(() => assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT, SHADOW_DATABASE_URL: shadow })).toThrow(
+        new RegExp(`SHADOW_DATABASE_URL must not be the same database as ${variable}`),
+      );
+    });
+
+    it("a shadow equal to the direct URL is refused even when only DATABASE_URL_UNPOOLED is set", () => {
+      expect(() => assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", DATABASE_URL_UNPOOLED: DIRECT, SHADOW_DATABASE_URL: POOLED })).toThrow(
+        /must not be the same database as DATABASE_URL_UNPOOLED/,
+      );
+    });
+
+    it("a separate shadow database is allowed", () => {
+      const shadow = DIRECT.replace("nazir_preview_test", "nazir_shadow_test");
+      expect(assertPrismaCliDatabase({ NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT, SHADOW_DATABASE_URL: shadow })).toMatchObject({
+        variable: "DATABASE_URL_UNPOOLED",
+      });
+    });
+
+    it("never echoes a password or a host, whichever URL is wrong", () => {
+      const cases: Record<string, string>[] = [
+        { NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT.replace("nazir_preview_test", "nazir_other_test") },
+        { NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DEV },
+        { NAZIR_RUNTIME_ENV: "local", DATABASE_URL: DEV, DATABASE_URL_UNPOOLED: "not a url s3cret" },
+        { NAZIR_RUNTIME_ENV: "test", DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT, SHADOW_DATABASE_URL: POOLED },
+      ];
+      for (const env of cases) {
+        let message = "";
+        try {
+          assertPrismaCliDatabase(env);
+        } catch (e) {
+          message = (e as Error).message;
+        }
+        expect(message, JSON.stringify(Object.keys(env))).not.toBe("");
+        expect(message).not.toContain("s3cret");
+        expect(message).not.toContain("neon.tech");
+      }
+    });
+  });
 });

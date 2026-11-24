@@ -82,6 +82,42 @@ describe("seed", () => {
     expect(await counts()).toEqual({ venues: 1, shows: 1, sessions: 2, seats: 78, session_seats: 156 });
   });
 
+  it("SEED-06 connects with DATABASE_URL_UNPOOLED (direct) when it is set: a broken DATABASE_URL does not matter", async () => {
+    // Both URLs name this database; only the pooled one carries a wrong password. The seed (and the CLI guard before
+    // it) must pick the direct URL, and nothing may print a password.
+    const marker = "wrong-pw-seed06";
+    const pooled = new URL(db.url);
+    pooled.password = marker;
+    const res = await runPrisma(["db", "seed"], {
+      databaseUrl: pooled.toString(),
+      unpooledUrl: db.url,
+      env: { NAZIR_RUNTIME_ENV: "test" },
+    });
+    expect(res.code, `${res.stdout}\n${res.stderr}`).toBe(0);
+    expect(res.stdout).toMatch(/via DATABASE_URL_UNPOOLED/);
+    expect(res.stdout + res.stderr).not.toContain(marker);
+    expect(await counts()).toEqual({ venues: 1, shows: 1, sessions: 2, seats: 78, session_seats: 156 });
+  });
+
+  it("SEED-06b without DATABASE_URL_UNPOOLED the seed uses DATABASE_URL, as before", async () => {
+    const res = await seed({ NAZIR_RUNTIME_ENV: "test" });
+    expect(res.code, `${res.stdout}\n${res.stderr}`).toBe(0);
+    expect(res.stdout).toMatch(/via DATABASE_URL:/);
+  });
+
+  it("SEED-06c a direct URL naming another database is refused and nothing is written", async () => {
+    const other = await cloneTestDb(server, inject("templateDb"));
+    try {
+      const res = await runPrisma(["db", "seed"], { databaseUrl: db.url, unpooledUrl: other.url, env: { NAZIR_RUNTIME_ENV: "test" } });
+      expect(res.code).not.toBe(0);
+      expect(res.stdout + res.stderr).toMatch(/must name the same database/);
+      expect(await counts()).toEqual({ venues: 0, shows: 0, sessions: 0, seats: 0, session_seats: 0 });
+      expect(await counts(other)).toEqual({ venues: 0, shows: 0, sessions: 0, seats: 0, session_seats: 0 });
+    } finally {
+      await destroyTestDb(other);
+    }
+  });
+
   it.each([
     ["production", "production"],
     ["missing NAZIR_RUNTIME_ENV (fail-closed => production)", ""],
