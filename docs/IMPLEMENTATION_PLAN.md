@@ -54,7 +54,7 @@ v1.0에서 P1이던 환불 결과 검증/기록, 관리자 감사 로그, REVIEW
 | 0.5 | 검토 반영 문서 개정(v1.1 → v1.2), `DECISIONS.md`, `PROVIDERS.md` | 문서 교차 일치, **사용자 승인** | 진행 중 |
 | 1 | Next.js/TS 기반, lint/typecheck/test/build, env schema, CI, Clock 인터페이스, 오류 체계, **Provider 단계 설정·fail-closed 기동 검사**(ARCH §6.5), Secret 로딩 | clean clone에서 README대로 실행, CI 통과, PRV-01~05 통과 | 없음 |
 | 2 | Prisma schema + raw SQL migration(제약 전체, `UNFULFILLED`, `provider_context_encrypted`, `card_company`), seed(임시 좌석), **스키마 계약 테스트** | 빈 PostgreSQL migration 성공, MIG-* 통과 | v1.2 승인(Q-004는 D-014로 해소). **구현·보완 완료, main 병합 승인 대기**(2026-11-16): `DATABASE.md` §19, 결정 A-032~A-041·D1~D8(`DECISIONS.md`). 후속 이월 항목은 §4.1 |
-| 3 | 공연/회차/좌석 조회, 판매 가능 조건, 임시 seat map, **카드사 심사용 공개 페이지**(상품·약관·환불규정·사업자정보 자리) | DB 상태와 UI 일치 | E-003(실제 좌석은 자료 수령 후), E-008. **진행 중**(2026-11-20): 1차 `DbClock`·표시용 판매 상태 함수·단위/DB 테스트 완료(TEST_PLAN §2.3·§2.4, CAT·CLK-01·DB-03), 앱 DB 연결 세션 `TimeZone=UTC` 고정(S11, DATABASE §19.12, TZ-01~06). 조회 API·화면·공개 페이지는 미착수 |
+| 3 | 공연/회차/좌석 조회, 판매 가능 조건, 임시 seat map, **카드사 심사용 공개 페이지**(상품·약관·환불규정·사업자정보 자리) | DB 상태와 UI 일치 | E-003(실제 좌석은 자료 수령 후), E-008. **코드 구현 완료(2026-11-22, 미병합)**: DbClock·판매/좌석 표시 상태(1차), 앱 DB 연결 `TimeZone=UTC`(S11), Neon Pooled/Direct 분리, 공개 조회 API 4종·공연/회차/좌석 페이지·임시 격자 배치도·정책/사업자 정보 페이지(입력 대기). **남은 조건:** 실제 Neon 연결 검증(`npm run verify:db-session`), 사업자 정보·약관·환불 규정·개인정보처리방침 본문(E-005·E-006·E-008), 실제 좌석·가격(E-003·E-004), 사용자 결정 Q-030~Q-033 |
 | 4 | identity: 바인딩·CSRF bootstrap, 인증 시작·콜백·claim, 인증 세션(고정 30분·잔여 10분·주문 생성 제한), subject HMAC, **Mock IdentityProvider**, NICE adapter 골격(원문 기준, 실호출 전) | IDV-* 통과(Mock), NIC-01~04(Mock 시나리오) | Q-002(식별값 — 설정 가능하게) |
 | 5 | booking: 주문 생성(한도 잠금·READ COMMITTED·잠금 후 판단·활성 주문·다중 점유), `expireOrder`, 취소 후 재예매, 소유 주체 Idempotency, 접근 세션, rate limit | SEAT-*, ORD-*, QTA-* 통과 | Q-011, Q-013(설정값) |
 | 6 | payments: 결제수단 목록·허용 목록, 결제 시작, 토스 success/fail 복귀, Tx1/confirm(멱등·60초·재시도)/Tx2/Tx3, 판매 확정·티켓, 재조회 작업, 웹훅 수신(서명·dedupe·10초 200)·비동기 처리, **Mock PaymentProvider 장애 주입 → 토스 Sandbox 연동** | PAY-*, WH-* 통과(Mock), SBX-* 통과(토스 테스트 키) | 토스 테스트 키(계약 전 발급 가능) |
@@ -187,3 +187,4 @@ Step 2에서 DB가 보장하는 범위와 **보장하지 않아 이후 Step이 �
 | 1.2.5 | 2026-11-18 | §4.1: A-042(승인 증거 불변, 환불 핵심·합계, Prisma CLI 환경 가드)에 대한 Step 6·8·10 지침과 Step 8 과제(승인 값 정정 절차) 추가. 단계·일정은 변경 없음 |
 | 1.2.6 | 2026-11-18 | §4.1 A-042 CLI 환경 가드 행에 Shadow DB 규칙 반영. 단계·일정은 변경 없음 |
 | 1.2.7 | 2026-11-20 | Step 3 진행 상태 표기(1차 작업). 단계·일정은 변경 없음 |
+| 1.2.8 | 2026-11-22 | Step 3 구현 상태와 남은 조건 표기. 단계·일정은 변경 없음 |

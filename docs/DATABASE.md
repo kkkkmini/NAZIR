@@ -1358,6 +1358,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.6 | 2026-11-18 | PR #2 기술 리뷰 후속(A-042): `SUCCEEDED` 결제의 승인 증거 불변 트리거(§7.1 컬럼 분류표), `refunds` 핵심 필드 불변 트리거와 `SEAT` 환불 합계 지연 constraint trigger 2개(§7.4), Prisma CLI 환경 가드(§14.1). §7.5·§13.3·§14·§19 갱신, §19.8의 "승인 후 UPDATE 가능" 서술 정정. A-041의 refunds UPDATE 허용과 A-001~A-037, D-001~D-015는 변경 없음 |
 | 1.2.7 | 2026-11-18 | Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사(A-042 보강, §14.1): 환경 규칙(`test` ⇔ `_test`) 동일 적용, 주 DB와 같은 DB 거부, 미설정 시 기존 동작. 다른 항목 변경 없음 |
 | 1.2.8 | 2026-11-20 | Step 3: `timestamptz` 세션 시간대 해석 문제(S11) 실측(§19.5)과 앱·트랜잭션·seed 연결의 `TimeZone=UTC` 고정(§19.12). 스키마·migration·seed 데이터 변경 없음 |
+| 1.2.9 | 2026-11-21 | Neon Pooled(`DATABASE_URL`)/Direct(`DATABASE_URL_UNPOOLED`) 연결 분리와 쌍 검증(§19.12). 스키마·migration 변경 없음 |
 
 ---
 
@@ -1570,12 +1571,15 @@ npm run test:db
 - `npm run db:seed` 후 `dev-seed-musical` 공연으로 UI를 개발할 수 있다(임시 데이터).
 - 쓰기 경로(Step 5 이후)는 반드시 raw query + 명시적 READ COMMITTED + §13.2 잠금 순서를 따르고, `updated_at`을 직접 갱신한다. 제약 이름은 `DB_CONSTRAINT`로 도메인 오류에 매핑하되 Prisma 오류의 `meta.driverAdapterError.cause`를 기준으로 한다(S7).
 - Step 3 착수 전 사용자 결정 필요: 없음(D1~D8 확정). Step 5 전: Q-025 세부 형식.
+- **Step 3 구현(2026-11-22):** 공개 조회는 `src/server/catalog/public-catalog.ts`(읽기 전용, 쓰기·잠금·hold 정리 없음). 좌석은 §11.1(`seat-display.ts`), 회차는 §11.11(`sales-status.ts`)로 한 번 읽은 DB 시각 하나로 계산한다. hold 만료는 주문 `hold_expires_at`을 epoch 밀리초로 읽어 비교한다.
+- **Step 5 오류 매핑(S7) 참고 — 2026-11-22 실측:** interactive `$transaction`의 **COMMIT 시점** 제약 오류(지연 제약·지연 constraint trigger)는 `PrismaClientKnownRequestError`로 감싸지지 않고 **`DriverAdapterError`가 그대로** 나온다. SQLSTATE는 `error.cause.originalCode`, 제약 이름은 `error.cause.constraint`에 있다. 문장 시점 오류는 `error.meta.driverAdapterError.cause`에 있다. 두 형태를 모두 처리해야 한다(`scripts/verify-db-session.ts` 4번).
 
 ### 19.12 Step 3: 앱 DB 연결의 세션 시간대 고정 (S11, 2026-11-20)
 
 - **원인:** §19.5 `timestamptz` 해석 행. 위험은 DB 공급자·DB·역할의 기본 `TimeZone`이 UTC가 아닐 때만 드러나며, 그때는 판매 기간·회차 시작·점유 만료(`hold_expires_at`)·결제 보호 시각 등 모든 시각 판단과 저장값이 9시간 어긋난다. 기존 테스트·CI 서버는 UTC라 드러나지 않았다.
 - **조치:** `src/server/db/pg-adapter.ts`의 `buildPgPoolConfig()`가 `pg` 8.23.1의 공식 `ClientConfig.options`(libpq `options` 시작 파라미터)에 `-c TimeZone=UTC`를 넣는다. `pg`는 이 값을 **pool이 여는 모든 연결의 startup packet**에 실으므로, 연결마다 첫 쿼리 전에 적용되고 새로 생기는 연결에도 빠지지 않는다(연결 하나에 `SET`을 하는 방식이 아님). 이 설정을 쓰는 연결 경로: ① 앱 `getPrisma()`(`src/server/db/client.ts`), ② 그 클라이언트의 interactive transaction(같은 pool의 연결을 쓴다), ③ 개발 seed(`prisma/seed.ts`, 2026-11-20 적용). 세 경로 모두 `buildPgPoolConfig()` 하나를 공유하며 시간대 설정을 따로 두지 않는다. 환경별 DB 검사(`assertDatabaseMatchesEnv`)는 그대로 먼저 실행된다.
 - **연결 문자열 보호:** `pg`는 연결 문자열 값을 설정 객체 **위에** 덮어쓴다. `DATABASE_URL`에 `options=`가 있으면 UTC 고정이 조용히 무시되므로(TZ-01 실측), 그런 URL은 수정하지 않고 **거부**한다(`DatabaseConfigError`).
+- **Pooled / Direct 분리(2026-11-21, Neon 대응):** 앱 런타임은 `DATABASE_URL`(Neon Pooled)만, Prisma CLI와 seed는 `DATABASE_URL_UNPOOLED`(Direct)를 우선하고 없으면 `DATABASE_URL`을 쓴다(로컬은 `DATABASE_URL`만으로 동작). 둘 다 있으면 서버 기동·CLI·seed가 **양쪽 모두** 환경 규칙(`test` ⇔ `_test`)을 검사하고, **같은 DB**여야 한다(`selectDirectDatabaseUrl()`; 같은 DB 판정은 호스트·포트·DB 이름, 루프백 표기와 `*.neon.tech`의 `-pooler` 엔드포인트를 같은 호스트로 본다). Shadow DB는 두 메인 주소 어느 쪽과도 같은 DB면 거부한다. Prisma CLI 자체의 연결(`migrate`)은 `pg` 설정을 거치지 않아 세션 UTC 고정이 적용되지 않는다 — migration SQL은 DateTime 파라미터를 쓰지 않으므로 현재 영향은 없다.
 - **규칙:** 앱 코드는 `SET [LOCAL] TIME ZONE`을 쓰지 않는다. `DbClock`은 epoch 밀리초로 읽어 세션 시간대와 무관하다(이중 방어).
 - **검증:** TEST_PLAN TZ-01~06. DB 기본 `timezone`을 `Asia/Seoul`로 둔 실제 PostgreSQL에서 앱 경로(`getPrisma()`·`getAppClock()`)로 확인하고, 수정을 제거하면 7개 테스트가 실패함을 확인했다(뮤테이션).
 - **남은 확인:** 트랜잭션 모드 커넥션 풀러(PgBouncer, 호스팅 공급자 pooler)가 `options` 시작 파라미터를 전달·거부·무시하는지는 미검증이다(E-007, §19.10-5). 배포 대상 DB가 정해지면 `SELECT current_setting('TimeZone')`이 `UTC`인지 실제 연결로 확인한다.

@@ -188,6 +188,22 @@
 - `GET /sessions/{id}/my-quota` → `{ "seatLimit": 4, "countedSeats": 2, "remaining": 2, "activeOrderId": "uuid|null" }`.
 - IP 기반 rate limit 및 짧은 캐시를 허용한다(좌석 상태는 최종 판단 근거가 아님).
 
+**구현(Step 3, 2026-11-22)** — `src/server/catalog/`(서비스 `public-catalog.ts`, HTTP `http.ts`), 경로 `src/app/api/v1/…`:
+
+| 엔드포인트 | 응답 | 오류 |
+|---|---|---|
+| `GET /shows` | `{ items: ShowSummary[], pagination }` | — |
+| `GET /shows/{showId}` | `ShowDetail` = `ShowSummary` + `sessions: Session[]` + `priceTable: {section, price}[]` | 400 `VALIDATION_FAILED`(UUID 아님), 404 `NOT_FOUND`(없음·비공개) |
+| `GET /shows/{showId}/sessions` | `{ items: Session[], pagination }` | 400, 404 |
+| `GET /sessions/{sessionId}/seats` | `{ show, session: Session, seatMap: {version, assetUrl}, seats: Seat[] }` | 400, 404 |
+
+- `ShowSummary` = `id, slug, title, description, posterUrl, venue{name,address,timezone}, salesOpensAt, salesClosesAt, priceRange{min,max}|null`
+- `Session` = `id, startsAt, endsAt, status, sellable, maxSeatsPerIdentity, seats{available,held,sold,blocked,total}` — `status`는 `sales-status.ts`가 §11.11과 §11.1 좌석 집계로 계산한다(`ON_SALE`·`TEMPORARILY_UNAVAILABLE`·`SOLD_OUT`·`UPCOMING`·`PAUSED`·`CLOSED`·`CANCELED`). `sellable`은 `status = ON_SALE`일 때만 참이다.
+- `Seat` = `id`(session_seats.id), `key`(seats.svg_seat_id, 배치도 매핑 키), `section, row, number, label, price, status`(§11.1: `AVAILABLE`/`HELD`/`SOLD`/`BLOCKED`).
+- 공개 대상은 `PUBLISHED` 공연뿐이다(`CLOSED` 노출은 미결정 Q-030, 임시로 숨김). 주문·hold·결제·인증 식별자와 `sold_order_item_id`는 응답에 없다(허용 목록, CAT-API-05).
+- 시각은 DB 기준(DbClock), 한 요청 안에서 같은 `now`로 좌석과 회차 상태를 함께 계산한다. 금액은 정수 KRW(number).
+- `Cache-Control: no-store`, rate limit 미구현 — 수치·저장소 미정(Q-013, Q-031).
+
 ### 4.4 주문 생성
 
 `POST /orders` — BOOKING 세션, CSRF, `Idempotency-Key` 필수.
@@ -452,3 +468,4 @@ v1.0의 `/admin/orders/review-required`, `/admin/orders/{id}/resolve`, `/admin/o
 | 1.0 | 2026-11-13 | 개발 전달 기준안. 원문: `docs/archive/v1.0/API_SPEC.md` |
 | 1.1 | 2026-11-14 | 인증 선행 흐름과 인증 세션·브라우저 바인딩·claim API, 쿠키 모델, CSRF, 외부 복귀 경로(서버 결정 returnUrl, 303), 좌석 변경 API 제거 및 주문 취소 API 추가, 주문 생성의 한도·활성 주문 오류, 결제 시작(수단 제한, 최소 잔여 시간), PG 복귀·펜싱·3분 보호·UNKNOWN 응답, webhook 재조회 기반 처리, 소유 주체 Idempotency, 관리자 권한 매트릭스·환불 3단계 API·review case action, 오류 코드 카탈로그 추가. lookup-verification API를 purpose로 통합 |
 | 1.2 | 2026-11-15 | 토스페이먼츠(결제창 API 개별 연동)·NICE아이디(통합인증) 확정 반영. 업체별 복귀 형식 표(§3.4), NICE 인증 URL·결과 요청 흐름(§4.2), 인증 세션 고정 30분·잔여 10분·주문 생성 제한과 오류 코드(§3.2, §4.4), `GET /payment-methods`와 활성 수단만 허용·토스 결제창 파라미터 대응(§4.6, D-011, D-012), 토스 success/fail 복귀와 confirm 멱등·재시도(§4.7), 웹훅 서명·eventId·10초 응답·비동기 조회(§4.9), 환불 `providerRefundId` 선택 입력과 취소 후보 제시(§5.3), `RELEASE_SEATS` → `UNFULFILLED`(§5.4), Mock 판매 금지·Secret 노출 금지(§7). 이전 원문: `docs/archive/v1.1/API_SPEC.md` |
+| 1.2.1 | 2026-11-22 | §4.3 Step 3 구현 기록(응답 형식·오류·캐시). 기존 명세는 변경 없음 |

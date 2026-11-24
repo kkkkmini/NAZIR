@@ -74,18 +74,25 @@
 | `tests/contract/schema/consistency.test.ts` | **MIG-11~15**: S3 주문↔결제 정합성(지연 constraint trigger는 `expectCommitError`와 실제 COMMIT으로 검증), S4 쿼터 FK와 DB 수준 동시성, Q-022 `OTHER`, Q-023 DELETE 차단, Q-024 인증 세션 FK, A-038 결제 원장(DELETE)·승인 금액 |
 | `tests/contract/schema/ledger-claims.test.ts` | **MIG-17~21 후속(74개)**: A-038 승인 시각, A-039 요청 수단·원문·미승인 결제의 수단 일치(+39), A-040 인증 세션 무결성(두 claim 순서, 보존·삭제 시나리오 포함), A-041 원장성 테이블 보호(벌크·실제 COMMIT 포함) |
 | `tests/contract/schema/ledger-evidence.test.ts` | **MIG-22·23 (63개)**: 승인 증거 불변(컬럼×역할 표 기반 테스트, 벌크, 강등, 허용 운영 UPDATE, 전이, 실제 COMMIT), 환불 핵심 불변(컬럼별·벌크·상태 전이·실제 COMMIT), `SEAT` 합계(COMMIT 시점, 실제 COMMIT 성공·실패) |
-| `tests/contract/schema/cli-guard.test.ts` | **MIG-24 (32개)**: 실제 Prisma CLI와 PostgreSQL로 `prisma.config.ts` 환경 가드 확인(`DATABASE_URL` 조합 + Shadow DB 조합, 거부 시 DB·Shadow DB 불변) |
-| `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(38개, DB 불필요, `npm test`). `isSameDatabase`(loopback 표기·포트·서버 비교)도 여기서 검증 |
+| `tests/contract/schema/cli-guard.test.ts` | **MIG-24 (32개)**: 실제 Prisma CLI와 PostgreSQL로 `prisma.config.ts` 환경 가드 확인(`DATABASE_URL` 조합 + Shadow DB 조합, 거부 시 DB·Shadow DB 불변) **DB-05**(Step 3): `DATABASE_URL_UNPOOLED`가 있으면 CLI가 그 주소로 연결(Pooled 주소에 틀린 비밀번호를 두어 실측), 없으면 `DATABASE_URL`, 다른 DB를 가리키는 쌍·다른 환경의 Direct 주소는 실행 전 거부, 비밀번호 비출력 |
+| `tests/unit/prisma-cli-guard.test.ts` | MIG-24의 순수 함수 규칙(38개, DB 불필요, `npm test`). `isSameDatabase`(loopback 표기·포트·서버 비교)도 여기서 검증 **DB-04**: Pooled/Direct 쌍 선택·같은 DB 검증·Shadow와 두 메인 주소 비교 |
 | `tests/unit/payment-method.test.ts` | A-039 서비스 규칙의 순수 함수 시험(DB 불필요, `npm test`): 생성 시 요청값 기록, 승인 시 요청값 불변, `DISALLOWED`→`OTHER`+원문, 원문 안전 검사 |
 | `tests/contract/schema/client.test.ts` | DB-01: 앱의 Prisma Client(`getPrisma()`)가 실제 DB에 연결, uuid·bigint(>2^53)·timestamptz 왕복, 명시적 READ COMMITTED, DB↔환경 불일치 거부. **MIG-16(DB-02)**: 타임스탬프 출처 실측 |
 | `tests/contract/schema/db-clock.test.ts` | **DB-03**(Step 3): `DbClock`(`getAppClock()`)이 실제 DB의 `now()`를 반환, 세션 `TimeZone=Asia/Seoul`(`SET LOCAL`)에서도 같은 순간 — 시계 자체의 시간대 독립성(§2.3 S11), 트랜잭션 클라이언트에 묶으면 트랜잭션 시작 시각 하나, 트랜잭션 밖에서는 증가, 연결 실패는 그대로 전파(시스템 시각 대체 없음) |
+| `tests/contract/schema/catalog.test.ts` | **CAT-API-01~07·CAT-UI-01**(Step 3, §2.5) |
+| `tests/contract/schema/pages.test.ts` | **PAGE-01~04**(Step 3, §2.5): 페이지 데이터 컴포넌트(`src/app/_catalog/content.tsx`)를 실제 DB로 실행, `connection()`만 대체, `notFound()`는 실제 함수 |
+| `tests/contract/schema/connection-roles.test.ts` | **DB-06**(Step 3): 앱 런타임은 `DATABASE_URL`(Pooled)로만 연결하고 `DATABASE_URL_UNPOOLED`는 쓰지 않음, 세션 UTC, `DATABASE_URL` 단독 동작 |
 | `tests/contract/schema/timezone.test.ts` | **TZ-01~05**(Step 3, §2.3 S11): 서울 기본 시간대 DB에서 앱 연결의 UTC 고정·연결별 적용·DateTime 왕복·`DbClock` 일치·판매 상태 |
-| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사. **SEED-05**(Step 3, S11): DB 기본 시간대 `Asia/Seoul`에서 실제 `prisma db seed`로 넣은 회차 시각이 실행 시각+30일 범위 안(epoch 기준), 일정 간격·인원 불변 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
+| `tests/contract/schema/seed.test.ts` | SEED-01~04: 생성·멱등·production/미설정/staging 거부·DB↔환경 교차 검사. **SEED-05**(Step 3, S11): DB 기본 시간대 `Asia/Seoul`에서 실제 `prisma db seed`로 넣은 회차 시각이 실행 시각+30일 범위 안(epoch 기준), 일정 간격·인원 불변. **SEED-06**(Step 3): `DATABASE_URL_UNPOOLED`가 있으면 seed가 그 주소로 연결(Pooled 주소 비밀번호가 틀려도 성공, 출력에 비밀번호 없음), 없으면 `DATABASE_URL`, 다른 DB를 가리키는 쌍은 거부 | SEED-03은 `_test`가 아닌 throwaway DB로 seed 가드의 환경 규칙을 직접 확인하고, SEED-03b는 `_test` DB + 비test 환경이 CLI 가드에서 먼저 거부됨을 확인한다
 | `tests/unit/db-clock.test.ts` | **CLK-01**(Step 3): `DbClock` 계약(가짜 executor, DB 불필요): epoch ms 해석, 매 호출 새 `Date`, DB 오류 그대로 전파, 행 수·형식·범위 이상 시 `DbClockError`, `FixedClock`과 교체 가능 |
+| `tests/unit/error-boundary.test.ts` | **PAGE-05**(Step 3): 오류 경계 재시도 |
+| `tests/unit/startup-guard.test.ts` | **PAGE-06**(Step 3): 서버 기동 시 DB 주소 조합(실제 `instrumentation-node` 모듈, `process.exit` 대체) |
+| `tests/unit/seat-map-layout.test.ts` | **CAT-08b**(Step 3): 임시 격자 배치(좌석 1회씩, 구역 가격순, 상태 불변) |
 | `tests/unit/sales-status.test.ts` | **CAT-01~06·08**(Step 3, §2.4) |
 | `tests/unit/seat-display.test.ts` | **CAT-07**(Step 3, §2.4): §11.1 좌석 표시 상태 |
 | `tests/unit/pg-adapter.test.ts` | **TZ-06**(Step 3): `buildPgPoolConfig()` (DB 불필요) |
-| `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) |
+| `tests/unit/check-config.test.ts` | **DB-07**(Step 3): `npm run check:config`을 실제 실행(DB 연결 없음): Pooled/Direct 쌍 요약(URL·비밀번호 비출력), `DATABASE_URL` 단독 통과, 다른 DB·다른 Neon 엔드포인트·다른 환경·`DATABASE_URL_UNPOOLED` 단독은 실패 |
+| `tests/unit/database-config.test.ts` | DB URL 파싱·개발/테스트 DB 분리·seed 가드(DB 불필요, `npm test`) **DB-04**(Step 3): Neon `-pooler` 호스트 정규화(`*.neon.tech`의 엔드포인트 라벨만), `selectDirectDatabaseUrl`(Direct 우선·공백은 미설정·같은 DB·양쪽 환경 규칙·비밀번호/호스트 비노출), seed의 Direct 선택, 앱 런타임 검사 `assertRuntimeDatabaseConfig`(`DATABASE_URL_UNPOOLED`만 있으면 기동 거부, CLI·seed는 단독 허용 유지) |
 
 필수 제약 목록(단일 정본)은 `tests/contract/schema/manifest.ts`다. 새 제약·테이블을 추가하면 여기에도 추가한다. MIG-06은 이후 migration이 manifest의 객체를 DROP하거나(`DROP INDEX/CONSTRAINT/TRIGGER/FUNCTION`), 그 객체가 의존하는 컬럼·테이블을 DROP하면 실패한다(정당한 CHECK 어휘 확장의 `DROP`+`ADD`도 현재는 위반으로 판정한다 — S8로 개선 예정). 롤백 트랜잭션 헬퍼 `rolledBack`은 롤백 직전에 `SET CONSTRAINTS ALL IMMEDIATE`로 커밋 시점 검사를 강제하므로, 커밋될 수 없는 상태를 남기는 테스트는 실패한다.
 
@@ -226,6 +233,8 @@ SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검
 | TZ-05 | SQL `now()` 기준으로 만든 시작된 회차·시작 전 회차·마감 지난 공연을 앱으로 읽어 판매 상태 계산(음성 대조: 수정 전 어댑터) | `CLOSED`·`ON_SALE`·`CLOSED`(수정 전: `UPCOMING`·`ON_SALE`로 틀림) |
 | TZ-06 | `buildPgPoolConfig()` 단위: UTC `options`, 앞뒤 공백·개행은 잘라 내고 **검사한 문자열 그대로** `pg`에 전달(그 밖은 불변), `options` 키(대소문자·빈 값·공백 뒤) 거부, 비밀번호 비노출 | — |
 
+**뮤테이션(2026-11-21, Pooled/Direct):** `prisma.config.ts`가 `DATABASE_URL`을 쓰도록 되돌리면 DB-05가, seed가 `DATABASE_URL`을 쓰도록 되돌리면 SEED-06이 실패한다.
+
 **뮤테이션(2026-11-20):** seed를 공통 설정 없이 되돌리면 SEED-05가 실패한다(저장 시각 약 9시간 이름). `options`를 제거하면 TZ-02(3개)·TZ-03(2개)·TZ-04(1개)·TZ-05(1개) 7개가 실패하고, 수정과 무관한 대조·epoch·URL 거부 5개만 통과한다.
 
 
@@ -259,6 +268,35 @@ SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검
 | CAT-06 | 미지 상태값, 잘못된 날짜, 음수·소수·NaN·누락 좌석 수 | `SalesStatusInputError`(추정하지 않음), 입력 불변 |
 | CAT-07 | §11.1 좌석 표시: `SOLD`·`BLOCKED`·`CONFIRMING`(만료 시각과 무관)·`ACTIVE` 만료 1ms 전/정각/1ms 후·종료된 hold·여러 hold·미지 상태값 | 정각부터 `AVAILABLE`, 종료 hold는 무시, `SOLD`·`BLOCKED`가 hold보다 우선, 미지 값은 `SeatDisplayInputError` |
 | CAT-08 | 좌석 행 → `countSeatDisplay` → 판매 상태: 유효 점유·`CONFIRMING`·만료(1ms 전, 정각) 점유, `SOLD` + 남은 좌석 `BLOCKED`, 좌석 0석 | 만료 점유만 남으면 `ON_SALE`(일시 품절 아님). `BLOCKED`만 남거나 0석이면 **현재** `SOLD_OUT`(정책 미결정) |
+
+### 2.5 Step 3 공개 조회 API·화면 (CAT-API, CAT-UI)
+
+`tests/contract/schema/catalog.test.ts` — 실제 PostgreSQL, 앱 경로(`getPrisma()` + DbClock). 좌석 상태는 실제 주문·항목·hold로 만든다(유효 `ACTIVE`, 만료 시각이 지난 `CONFIRMING`, 만료된 `ACTIVE`, `RELEASED`, `SOLD`, `BLOCKED`).
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| CAT-API-01 | 공연 목록·상세·회차 목록: `PUBLISHED`·`DRAFT`·`CLOSED`·없는 공연, 형식이 틀린 id | `PUBLISHED`만 노출, 나머지 404 `NOT_FOUND`(`CLOSED`는 임시 기본값 Q-030), 형식 오류 400 `VALIDATION_FAILED` |
+| CAT-API-02 | 회차별 좌석 상태 | 모든 좌석이 §11.1과 일치(만료 `ACTIVE`·`RELEASED`는 `AVAILABLE`, 만료 시각이 지난 `CONFIRMING`은 `HELD`), 비공개 공연의 회차·없는 회차 404 |
+| CAT-API-03 | 회차 판매 상태와 집계 | `ON_SALE`/`TEMPORARILY_UNAVAILABLE`/`SOLD_OUT`/`PAUSED`/`CLOSED`(시작 후)/`CANCELED`, `BLOCKED`만 남은 회차는 **현재** `SOLD_OUT`(Q-032). 좌석 응답·회차 목록·공연 상세의 상태와 집계가 서로 일치, 가격표·가격 범위(number) |
+| CAT-API-04 | DB 시각 기준·읽기 전용 | 유효 hold의 만료 시각을 지나게 하면 다음 요청에서 `TEMPORARILY_UNAVAILABLE` → `ON_SALE`, 조회 전후 주문·hold·좌석 지문 불변 |
+| CAT-API-05 | 공개 필드 허용 목록 | 허용 목록 밖의 키 없음, 주문·주문 항목·동일인 주체·공연장 id가 응답 어디에도 없음 |
+| CAT-API-06 | 의존성 실패 | 500 `INTERNAL_ERROR` 공통 본문, 내부 오류 문구 비노출 |
+| CAT-UI-01 | 좌석 배치도·상태 배지 렌더링 | 렌더된 HTML의 좌석별 `data-status`가 DB 기대값과 일치, 임시 점유 안내 문구는 `HELD` 좌석이 있을 때만, 배지 문구는 확정 문구(예매 가능·일시 품절·매진) |
+| CAT-API-07 | 좌석 정렬(리뷰 M2): 열 `10`·`9`·`B`·`A`·라벨 없음, 좌석 번호 `12345678901`·`10`·`2` | 200 응답(10자리 이상 좌석 번호에서 오류 없음), 열 9 → 10 → A → B → 라벨 없음, 좌석 2 → 10 → 12345678901, 렌더된 배치도의 열 순서도 같음. 개발 seed 156석의 정렬은 수정 전과 동일(2026-11-22 확인) |
+| PAGE-01 | 홈(U1): 공개 공연 1개 / 여러 개(초안·종료 공연 포함) / 0개 | 1개면 그 공연 소개, 여러 개면 공개 공연만 목록, 0개면 안내 문구 |
+| PAGE-02 | 공연 페이지: 공개 slug, 없는 slug, `DRAFT` 공연 | 렌더링 / `notFound()` / `notFound()` |
+| PAGE-03 | 좌석 페이지: 같은 공연의 회차, **다른 공개 공연의 회차(slug·회차 소속 불일치, 양방향)**, 없는 회차, UUID 아님, 없는 slug | 렌더링, 나머지는 모두 `notFound()` |
+| PAGE-04 | `DATABASE_URL` 없음 | 페이지 내용이 설정 오류로 실패한다(오류 경계로 전달, 빈 화면이나 가짜 내용 없음) |
+| PAGE-05 | 오류 경계 "다시 시도"(리뷰 M1) | `retry`를 호출하고 `reset`은 호출하지 않음, 오류 문구 비노출 |
+| PAGE-06 | 서버 기동: DB 주소 없음 / `DATABASE_URL_UNPOOLED` 단독 / 정상 쌍 / 다른 DB 쌍 / 다른 환경 DB | 없음은 **현재** 기동(필수화는 미결정, 리뷰 M3), 단독·다른 DB·다른 환경은 `process.exit(1)`, 정상 쌍은 Pooled DB를 비밀번호 없이 기록 |
+
+**뮤테이션(2026-11-22):** hold 만료 무시 → 7개 실패, `CLOSED` 공연 공개 → 3개 실패, 임시 점유 수 제거 → 3개 실패. 리뷰 반영분: 예전 정렬 SQL(`::int`) 복원 → CAT-API-07 실패(500), 공연·회차 소속 검사 제거 → PAGE-03 실패, 홈 단일 공연 분기 깨뜨림 → PAGE-01 실패, `error.tsx`를 `reset`으로 되돌림 → PAGE-05 실패.
+
+**오류 경계 재시도 실측(2026-11-22, 리뷰 M1):** 실제 빌드(`next start`)를 아직 없는 DB로 띄워 오류 화면 → DB 생성·migration·seed → 브라우저에서 "다시 시도" 버튼 클릭 → 문서 재요청 없이 RSC 재요청(`GET /?_rsc=… 200`)만으로 공연 화면 복구. Next.js 16.4.6의 `retry`는 `router.refresh()` 후 오류 상태를 지운다(설치본 `error-boundary.js` 확인).
+
+**수동 확인(2026-11-22, 로컬 `next start` + 개발 seed + SQL로 만든 판매·점유·차단 좌석):** API·페이지 응답, 브라우저(Playwright)에서 좌석 `data-status` = DB, 390px 폭에서 가로 넘침 없음. 페이지의 없는 공연·회차는 PPR 특성상 HTTP 200 + not-found 화면 + `noindex`로 응답한다(API는 404).
+
+**DB 세션 검증 스크립트:** `npm run verify:db-session`(비파괴: 임시 테이블·트랜잭션 단위 잠금만) — `DATABASE_URL`로 세션 TimeZone=UTC, 트랜잭션 연결 고정·`FOR UPDATE`, 동시 트랜잭션 잠금 경합, COMMIT 시점 지연 제약 오류. 2026-11-22 로컬 PostgreSQL 직접 연결과 **PgBouncer 1.22 트랜잭션 모드**(서울 기본 시간대 DB)에서 4개 모두 통과. **실제 Neon에서는 미실행.**
 
 ## 3. P0 좌석/점유
 
@@ -592,3 +630,6 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.8 | 2026-11-20 | Step 3 1차 작업: CAT-01~06(§2.4, 표시용 판매 상태), CLK-01·DB-03(`DbClock`), S11(§2.3, `timestamptz`의 세션 TimeZone 해석 문제, 결정 대기) 추가, 테스트 파일 대응 추가. 기존 시나리오 정의는 변경 없음 |
 | 1.2.9 | 2026-11-20 | S11 해결 반영: TZ-01~06·SEED-05 신설(§2.3), 테스트 파일 대응·뮤테이션 결과 추가. 기존 시나리오 정의는 변경 없음 |
 | 1.2.10 | 2026-11-21 | 1차 리뷰 반영: `TEMPORARILY_UNAVAILABLE`(일시 품절) 확정 표시와 안내 문구, CAT-04~06 갱신·CAT-07·08 신설, `BLOCKED`만 남은 회차 정책 미결정 기록, TZ-06 공백 처리. 우선순위·`CLOSED` 공연 노출은 승인 대기 유지 |
+| 1.2.11 | 2026-11-21 | Neon Pooled/Direct 연결 분리: DB-04(단위)·DB-05(CLI)·DB-06(앱 런타임)·DB-07(`check:config`)·SEED-06 신설, 뮤테이션 결과(§2.3). 기존 시나리오 정의는 변경 없음 |
+| 1.2.12 | 2026-11-22 | Step 3 공개 조회 API·화면: §2.5 CAT-API-01~06·CAT-UI-01·CAT-08b, 뮤테이션·수동 확인 결과, `verify:db-session` 스크립트와 PgBouncer 결과. 기존 시나리오 정의는 변경 없음 |
+| 1.2.13 | 2026-11-22 | 통합 리뷰 즉시 수정 반영: CAT-API-07(좌석 정렬), PAGE-01~06(페이지 계층·오류 경계·서버 기동) 신설, 뮤테이션·오류 경계 재시도 실측 결과. 기존 시나리오 정의는 변경 없음 |
