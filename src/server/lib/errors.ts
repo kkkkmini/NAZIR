@@ -29,6 +29,8 @@ export const ERROR_STATUS = {
   RATE_LIMITED: 429,
   INTERNAL_ERROR: 500,
   PROVIDER_UNAVAILABLE: 503,
+  /** Rate limit store unavailable: fail-closed, distinct from the user's own RATE_LIMITED (A-045). */
+  RATE_LIMIT_UNAVAILABLE: 503,
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_STATUS;

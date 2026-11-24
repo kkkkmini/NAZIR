@@ -13,11 +13,13 @@ import {
 } from "../src/server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "../src/server/config/runtime-config";
 import { SecretConfigError, assertStartupSecurityConfig } from "../src/server/lib/secrets";
+import { assertStartupRateLimitConfig } from "../src/server/rate-limit/config";
 
 try {
   const c = loadRuntimeConfig(process.env);
   const summary: Record<string, unknown> = { ...describeRuntimeConfig(c) };
   assertStartupSecurityConfig(process.env, c.runtimeEnv);
+  assertStartupRateLimitConfig(process.env, c.runtimeEnv);
   const db = assertRuntimeDatabaseConfig(c.runtimeEnv, process.env);
   if (db) {
     summary.database = describeDatabase(db.pooled);

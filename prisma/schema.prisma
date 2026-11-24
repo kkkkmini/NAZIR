@@ -700,3 +700,20 @@ model OutboxEvent {
   @@index([aggregateType, aggregateId, aggregateVersion], map: "outbox_events_aggregate_idx")
   @@map("outbox_events")
 }
+
+// Rate limit counters (DECISIONS A-045, DATABASE.md §3.28). Shared fixed-window counter per (policy, key).
+// key_hash is a versioned HMAC of the identifier (never a raw IP/binding value). All times are DB now().
+// Written only by src/server/rate-limit/store.ts with one atomic INSERT ... ON CONFLICT DO UPDATE.
+model RateLimitCounter {
+  policy          String   @db.VarChar(64)
+  keyHash         String   @map("key_hash") @db.VarChar(64)
+  windowStartedAt DateTime @map("window_started_at") @db.Timestamptz(6)
+  expiresAt       DateTime @map("expires_at") @db.Timestamptz(6)
+  count           Int
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([policy, keyHash], map: "rate_limit_counters_pkey")
+  @@index([expiresAt], map: "rate_limit_counters_expires_idx")
+  @@map("rate_limit_counters")
+}

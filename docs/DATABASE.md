@@ -90,7 +90,20 @@ v1.1 기준 핵심 테이블은 **27개**다. (v1.0: 21개)
 | 관리자 (3) | `admins`, `admin_sessions`, `admin_audit_logs` |
 | 운영·외부 연동 (2) | `review_cases`, `outbox_events` |
 
-조건부: rate limit 저장소를 PostgreSQL로 결정하면 `rate_limit_counters`를 추가한다[권장 Q-013]. 이 경우 28개.
+**28번째 테이블 `rate_limit_counters`** [채택 A-045, 2026-11-24 migration `20261124120000_rate_limit_counters`]: 정책·키별 고정 창 카운터.
+
+| 컬럼 | 타입 | 제약 |
+|---|---|---|
+| `policy` | varchar(64) | PK(1), CHECK `^[a-z][a-z0-9_.]{0,63}$` (코드 레지스트리의 이름만) |
+| `key_hash` | varchar(64) | PK(2), CHECK `^v<N>\.[base64url 43자]$` — 식별값(IP /64·바인딩 등)의 HMAC(`NAZIR_RATE_LIMIT` 키링, 버전 포함). **원문 저장 금지** |
+| `window_started_at` | timestamptz | NOT NULL, DB `now()` |
+| `expires_at` | timestamptz | NOT NULL, CHECK `> window_started_at`, 인덱스 `rate_limit_counters_expires_idx` |
+| `count` | int | NOT NULL, CHECK `>= 1`, 상한 limit+1 |
+| `created_at`/`updated_at` | timestamptz | DEFAULT now() |
+
+- 증가는 단일 `INSERT … ON CONFLICT (policy, key_hash) DO UPDATE … RETURNING`(`src/server/rate-limit/store.ts`). `expires_at <= now()`이면 창을 새로 시작(count 1). 거절된 요청도 세지만 창은 연장하지 않는다.
+- 정리: `deleteExpiredCounters`(만료 행을 배치로 `SKIP LOCKED` 삭제). 실행 주기·주체(Cron 등)는 미정.
+- 개인정보 없음(HMAC 키를 모르면 원문 역산 불가, 창이 끝나면 의미 없음). FK 없음 — 다른 테이블과 독립.
 
 ### 3.1 v1.0 대비 변경 요약
 
@@ -1370,7 +1383,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 
 | 항목 | 결과 |
 |---|---|
-| 테이블 | 27개 전부(§3). `rate_limit_counters`는 Q-013 미결정이라 만들지 않음 |
+| 테이블 | 27개 전부(§3) + `rate_limit_counters`(A-045, 2026-11-24) |
 | 외래 키 | 40개(복합 16개). **전부 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`**, 즉시 검사, MATCH SIMPLE |
 | CHECK | 55개(상태값 31 + 금액·한도·소유·수단·승인 금액·승인 시각·원문·수단 일치 24) |
 | UNIQUE | 38개(PK·partial 제외). 그중 `seats` 1개는 `NULLS NOT DISTINCT` |

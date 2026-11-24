@@ -69,7 +69,7 @@ describe("MIG-01 migrate deploy on an empty PostgreSQL", () => {
       expect(rows.every((r) => r.finished && !r.rolled_back)).toBe(true);
 
       expect(await checkTables(c)).toEqual([]);
-      expect(TABLES).toHaveLength(27);
+      expect(TABLES).toHaveLength(28); // 27 core + rate_limit_counters (A-045)
     } finally {
       await c.end();
     }

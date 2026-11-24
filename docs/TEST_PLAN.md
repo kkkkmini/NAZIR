@@ -423,6 +423,29 @@ v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌�
 
 **결과(2026-11-24):** unit 332 passed(BOOT 포함 37건 신규), DB 390 passed. 실제 Chromium(Playwright, `next start`, http://localhost)에서 쿠키 저장·속성·JS 비노출·재방문 시 재설정 없음·같은 토큰 확인.
 
+### 6.2 Rate limit (RL, Step 4, A-045)
+
+Unit `tests/unit/rate-limit.test.ts`(RL-U01~U05), DB `tests/contract/schema/rate-limit.test.ts`(RL-01~12, 실제 PostgreSQL).
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| RL-U01 | 신뢰 IP | `x-vercel-forwarded-for`만 사용, `x-forwarded-for`·`x-real-ip` 무시, 누락·목록·형식 오류 거부, IPv6 /64, `fixed`는 local·test만 |
+| RL-U02 | 정책값 | 초안 기본값, `identity.start.binding` 설정 필수, 잘못된 override 거부 |
+| RL-U03 | 설정 | staging·production 키링·`vercel` 필수, CSRF 키 공유 거부, local·test 누락 시 사용 단계에서 실패 |
+| RL-U04 | 키 | 버전 포함 HMAC, 정책·차원·값 분리, 원문 미포함 |
+| RL-U05 | 결과 | 허용·남은 횟수, 거절·retryAt(DB 시각), 429 vs 503 구분, 미설정 정책 503 |
+| RL-01~03 | 최초·도달·초과 | 1회 허용, limit번째 남은 0, 초과 거절, 거절이 창을 연장하지 않음, count 상한 limit+1 |
+| RL-04 | 창 경과 | count 1로 재시작 |
+| RL-05·06 | 분리 | 정책별, IP별, 바인딩별 |
+| RL-07 | 원문 미저장 | 행에 IP·바인딩 원문 없음, CHECK가 원문 키·임의 정책명 거부 |
+| RL-08 | DB 시각 | 프로세스 시계가 2001년이어도 창은 DB now() |
+| RL-09 | 동시성 | advisory lock barrier로 50개 트랜잭션 동시 진행: limit 10 → 정확히 10 허용, 남은 값 9..0 각 1회, 행 1개; 최초 INSERT 경합 50/50 정확; 25개 키 독립; 앱 Prisma 풀로 30건 → 7 허용 |
+| RL-10 | 저장소 장애 | 연결 실패·테이블 없음 → 503 `RATE_LIMIT_UNAVAILABLE`, 로그에 IP 없음 |
+| RL-11 | 정리 | 만료 행만 배치 삭제 |
+| RL-12 | 경계 시각 | `expires_at = now()`는 만료(재시작·삭제), `+1µs`는 유지 |
+
+**결과(2026-11-24):** unit 352 passed, DB 407 passed.
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |

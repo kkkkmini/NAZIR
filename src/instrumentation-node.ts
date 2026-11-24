@@ -11,6 +11,7 @@ import {
 } from "./server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "./server/config/runtime-config";
 import { SecretConfigError, assertStartupSecurityConfig } from "./server/lib/secrets";
+import { assertStartupRateLimitConfig } from "./server/rate-limit/config";
 
 try {
   const config = loadRuntimeConfig(process.env);
@@ -23,6 +24,7 @@ try {
   // environment and be the same database.
   // Origin + CSRF keys (A-044): malformed is refused everywhere, missing is refused in staging/production.
   assertStartupSecurityConfig(process.env, config.runtimeEnv);
+  assertStartupRateLimitConfig(process.env, config.runtimeEnv);
   const db = assertRuntimeDatabaseConfig(config.runtimeEnv, process.env);
   if (db) {
     console.info("[nazir] database", JSON.stringify(describeDatabase(db.pooled)));

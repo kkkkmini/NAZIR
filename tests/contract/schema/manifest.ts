@@ -42,7 +42,7 @@ import {
   WEBHOOK_EVENT_STATUS,
 } from "../../../src/server/db/constants";
 
-/** DATABASE.md §3: 27 core tables. (rate_limit_counters is conditional on Q-013 and not created.) */
+/** DATABASE.md §3: 27 core tables + rate_limit_counters (A-045, Q-013). */
 export const TABLES = [
   "venues", "shows", "show_sessions", "seats", "session_seats",
   "identity_subjects", "identity_verifications", "identity_sessions",
@@ -52,6 +52,7 @@ export const TABLES = [
   "tickets",
   "admins", "admin_sessions", "admin_audit_logs",
   "review_cases", "outbox_events",
+  "rate_limit_counters",
 ] as const;
 
 // ───────────────────────── MIG-02: partial unique indexes ─────────────────────────
@@ -240,6 +241,11 @@ export const CHECKS: CheckSpec[] = [
   { name: "payments_succeeded_role_ck", table: "payments", columns: ["status", "role"] },
   { name: "refunds_total_amount_ck", table: "refunds", columns: ["total_amount"] },
   { name: "refund_items_amount_ck", table: "refund_items", columns: ["amount"] },
+  // rate_limit_counters (A-045)
+  { name: "rate_limit_counters_policy_ck", table: "rate_limit_counters", columns: ["policy"] },
+  { name: "rate_limit_counters_key_hash_ck", table: "rate_limit_counters", columns: ["key_hash"] },
+  { name: "rate_limit_counters_count_ck", table: "rate_limit_counters", columns: ["count"] },
+  { name: "rate_limit_counters_window_ck", table: "rate_limit_counters", columns: ["expires_at", "window_started_at"] },
 ];
 
 // ───────────────────────── MIG-04: composite foreign keys ─────────────────────────

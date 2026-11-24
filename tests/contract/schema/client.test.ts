@@ -97,7 +97,7 @@ describe("DB-02 timestamp sources", () => {
     expect(rows.length).toBeGreaterThanOrEqual(45);
     const wrong = rows.filter((r) => r.column_default !== "CURRENT_TIMESTAMP" || r.is_nullable !== "NO");
     expect(wrong).toEqual([]);
-    expect(rows.filter((r) => r.column_name === "updated_at")).toHaveLength(19);
+    expect(rows.filter((r) => r.column_name === "updated_at")).toHaveLength(20); // + rate_limit_counters (A-045)
   });
 
   it("raw SQL: omitted created_at / updated_at come from the DB clock = transaction start; a raw UPDATE leaves updated_at alone", async () => {
