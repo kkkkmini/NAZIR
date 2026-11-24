@@ -12,10 +12,12 @@ import {
   describeDatabase,
 } from "../src/server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "../src/server/config/runtime-config";
+import { SecretConfigError, assertStartupSecurityConfig } from "../src/server/lib/secrets";
 
 try {
   const c = loadRuntimeConfig(process.env);
   const summary: Record<string, unknown> = { ...describeRuntimeConfig(c) };
+  assertStartupSecurityConfig(process.env, c.runtimeEnv);
   const db = assertRuntimeDatabaseConfig(c.runtimeEnv, process.env);
   if (db) {
     summary.database = describeDatabase(db.pooled);
@@ -23,7 +25,7 @@ try {
   }
   console.log(JSON.stringify(summary, null, 2));
 } catch (e) {
-  if (e instanceof ConfigError || e instanceof DatabaseConfigError) {
+  if (e instanceof ConfigError || e instanceof DatabaseConfigError || e instanceof SecretConfigError) {
     console.error(e.message);
     process.exit(1);
   }

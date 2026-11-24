@@ -160,6 +160,11 @@
 
 `GET /bootstrap` → `{ "csrfToken": "…" }`. 바인딩 쿠키가 없으면 새로 발급한다. 캐시 금지.
 
+**구현(Step 4, 2026-11-24, A-044)** — `src/server/identity/bootstrap.ts`, `src/server/lib/{secrets,cookies,csrf}.ts`, `src/server/lib/crypto/hmac.ts`. DB 접근 없음.
+- 유효한 `__Host-nz_bind`(43자 base64url)가 있으면 재사용하고 `Set-Cookie`를 보내지 않는다(30일 수명 연장 없음). 없음·형식 오류·중복이면 새 값 발급.
+- 응답 `Cache-Control: no-store`. 보안 설정(`NAZIR_APP_ORIGIN`, `NAZIR_CSRF_KEYS`/`_KEY_CURRENT`)이 없거나 잘못되면 500 `INTERNAL_ERROR`, 쿠키·토큰 없음.
+- 토큰 형식 `v<N>.<base64url 43자>`. 상태 변경 API는 `assertCsrf`(Origin 정확 일치 + `Sec-Fetch-Site` + 토큰)를 호출한다.
+
 ### 4.2 본인인증 및 인증 세션
 
 **시작:** `POST /identity-verifications`

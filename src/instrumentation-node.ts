@@ -10,6 +10,7 @@ import {
   describeDatabase,
 } from "./server/config/database-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "./server/config/runtime-config";
+import { SecretConfigError, assertStartupSecurityConfig } from "./server/lib/secrets";
 
 try {
   const config = loadRuntimeConfig(process.env);
@@ -20,12 +21,14 @@ try {
   // The runtime connects with DATABASE_URL only (pooled). DATABASE_URL_UNPOOLED (direct, Prisma CLI + seed) is not used
   // here, but alone it is refused (the app would have no database), and next to DATABASE_URL it must belong to this
   // environment and be the same database.
+  // Origin + CSRF keys (A-044): malformed is refused everywhere, missing is refused in staging/production.
+  assertStartupSecurityConfig(process.env, config.runtimeEnv);
   const db = assertRuntimeDatabaseConfig(config.runtimeEnv, process.env);
   if (db) {
     console.info("[nazir] database", JSON.stringify(describeDatabase(db.pooled)));
   }
 } catch (e) {
-  if (e instanceof ConfigError || e instanceof DatabaseConfigError) {
+  if (e instanceof ConfigError || e instanceof DatabaseConfigError || e instanceof SecretConfigError) {
     console.error(`[nazir] refusing to start\n${e.message}`);
     process.exit(1);
   }

@@ -404,6 +404,25 @@ v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌�
 | IDV-21 | 세션당 주문 생성 상한(설정값) 초과, 주체·회차 시간당 상한 초과 | 429 `ORDER_CREATION_LIMITED` |
 | IDV-22 | 다른 브라우저에서 새 인증 후 같은 회차 주문(첫 브라우저에 활성 주문 존재) | 같은 subject로 409 `ACTIVE_ORDER_EXISTS` |
 
+### 6.1 Bootstrap·CSRF (BOOT, Step 4, A-044) — `tests/unit/bootstrap-csrf.test.ts`
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| BOOT-01 | 최초 방문 | `__Host-nz_bind` 발급(Secure·HttpOnly·Path=/·SameSite=Lax·Max-Age 30일·Domain 없음), `no-store`, 토큰 검증 통과 |
+| BOOT-02 | 유효한 쿠키로 재방문 | 재사용, `Set-Cookie` 없음, 같은 토큰 |
+| BOOT-03 | 형식 오류·중복 쿠키 | 새 바인딩 발급 |
+| BOOT-04 | 보안 설정 누락 | 500, 쿠키·토큰 없음, 키 미노출 |
+| BOOT-05 | 다른 바인딩·변조·형식 오류 토큰 | 검증 실패 |
+| BOOT-06 | 용도가 다른 HMAC | 검증 실패(용도 분리) |
+| BOOT-07 | 키 교체 | 새 토큰은 현재 버전, 이전 버전 검증 허용, 제거된 버전 거부 |
+| BOOT-08 | 정확한 Origin + 유효 토큰 | 통과 |
+| BOOT-09 | Origin 누락·`null`·타 사이트·슬래시·http·하위 도메인, `Sec-Fetch-Site` cross/same-site | 403 `CSRF_REJECTED` |
+| BOOT-10 | 토큰 누락·다른 바인딩 토큰·바인딩 없음 | 403 `CSRF_REJECTED` |
+| BOOT-11 | 키링 형식 오류(짝 누락·짧은 키·버전 없음·현재 버전 없음·중복 버전·같은 키·base64url 아님), 키링 간 키 공유 | 거부, 오류에 키 미노출 |
+| BOOT-12 | 환경별: production·staging 누락 시 기동 거부, local·test는 기동 후 사용 시 실패, Origin 규칙(https·loopback http) | 표대로 |
+
+**결과(2026-11-24):** unit 332 passed(BOOT 포함 37건 신규), DB 390 passed. 실제 Chromium(Playwright, `next start`, http://localhost)에서 쿠키 저장·속성·JS 비노출·재방문 시 재설정 없음·같은 토큰 확인.
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |

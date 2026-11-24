@@ -96,6 +96,10 @@
 | A-040 | **인증 세션은 원 인증의 주체·용도·브라우저 바인딩을 가지며, 세션과 `CONSUMED` 인증은 양방향으로 대응한다(Q-028 채택, 사용자 승인 2026-11-17).** ① `identity_verifications UNIQUE (id, identity_subject_id, purpose, browser_binding_hash)` + `identity_sessions` 4열 복합 FK(`identity_sessions_verification_claim_fk`) — 다른 브라우저의 claim을 DB가 거부. ② 지연(DEFERRABLE INITIALLY DEFERRED) constraint trigger 2개 — 커밋 시점에 세션이 있으면 인증은 `CONSUMED`, `CONSUMED`이면 세션이 존재. claim 트랜잭션에서 인증 `VERIFIED→CONSUMED`와 세션 INSERT는 어느 순서로 써도 허용된다. 세션의 `REVOKED`·`EXPIRED`는 세션 수명주기이며 인증 상태와 무관하다. `claim_expires_at` 판단은 서비스가 Clock으로 한다(DB 시각 정책 없음). **보존 정책은 바꾸지 않는다**: `orders.identity_session_id`가 RESTRICT라 주문을 만든 세션·인증은 물리 삭제할 수 없고(개인정보 컬럼 제거는 UPDATE로 가능), 이것이 개인정보 보존 기간 정책(Q-016, E-006)과 충돌할 수 있음을 기록한다. | Q-028 |
 | A-041 | **원장성 테이블 보호는 한정 범위로 적용한다(Q-029, 사용자 지시 2026-11-17).** `admin_audit_logs`·`payment_status_logs`·`refund_items`는 UPDATE·DELETE 모두 차단, `refunds`는 DELETE만 차단(UPDATE는 환불 상태 전이를 위해 허용 — 이 결정은 유지하며, 핵심 필드 보호는 A-042가 UPDATE 허용 위에 더한다). 트리거는 `ledger_reject_update()`/`ledger_reject_delete()`(SQLSTATE `23001`). **이번에 다루지 않는 것**: `tickets`·`orders`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events` — 각 서비스의 쓰기 패턴과 보존 정책(Q-016)이 정해진 뒤 결정한다. TRUNCATE와 소유자·슈퍼유저 권한은 DB로 막을 수 없어 Step 10 역할 분리(S9)로 통제한다. | Q-029 |
 | A-042 | **PR #2 기술 리뷰 후속 3건(사용자 지시 2026-11-18).** ① **승인 증거 불변**: `SUCCEEDED` 결제는 `PRIMARY`·`EXCESS` 모두 `approved_amount`·`approved_at`·`method_type`·`provider_method_raw`·`easy_pay_provider`·`card_company`·`merchant_payment_ref`·`provider_payment_id`·`pg_transaction_id`·`provider`·`status`·`order_id`·`requested_amount`·`currency`를 바꿀 수 없다(행 트리거 `payments_approved_evidence_no_change`, AFTER UPDATE). 환불 누적·재조회 관리 컬럼(`refunded_amount`, `last_verified_at`, `requery_count`, `next_requery_at` 등)과 `role`(지연 trigger가 관장)은 허용한다. `EXCESS`의 `FAILED`/`CANCELED` 강등은 `status` 불변으로 막는다. ② **환불 핵심 불변 + SEAT 합계**: `refunds`의 `id`·`order_id`·`payment_id`·`refund_type`·`provider`·`total_amount`·`requested_by_admin_id`·`created_at`은 생성 후 바꿀 수 없고(트리거 `refunds_core_no_change`), 상태 전이와 운영 메타데이터 UPDATE는 허용한다(A-041/Q-029의 "refunds UPDATE 허용"을 뒤집지 않음). `SEAT` 환불은 COMMIT에서 `total_amount = SUM(refund_items.amount)`(항목 1건 이상), `PAYMENT_EXCESS` 환불은 항목 없음을 지연 constraint trigger 2개가 검사한다. ③ **Prisma CLI 환경 가드**: `prisma.config.ts`가 명령 실행 전에 `DATABASE_URL`과 `SHADOW_DATABASE_URL`을 `NAZIR_RUNTIME_ENV`와 대조한다(test ⇔ `_test` DB, 누락·미지 값은 production, `DATABASE_URL` 없으면 주 DB 검사 없음). **Shadow DB도 같은 규칙으로 검사하고(CLI가 초기화·재작성하므로 `_test` Shadow DB로 개발 DB를 우회할 수 없다), 주 DB와 같은 DB는 거부하며, 미설정이면 기존 동작이다(2026-11-18 PR #2 추가 리뷰로 보강).** **알려진 결과:** 승인 값을 잘못 기록하면 UPDATE로 고칠 수 없으므로 정정 절차가 필요하다(Step 8, 감사 로그 + 관리자 전용 권한). 트리거를 AFTER로 둔 것은 CHECK·FK가 먼저 판정해 도메인 규칙 위반이 기존 제약 이름으로 계속 보고되게 하기 위함이다. | PR #2 기술 리뷰 (P1·P1·P2) |
+| A-043 | **동일인 식별·개인정보 보호·키 관리(Q-002·Q-016 확정, 사용자 결정 2026-11-24).** ① 동일인 식별은 **NICE DI**. 원본 DI·CI는 DB에 저장하지 않고, DI 전용 키링의 HMAC(`subject_key_hash`)과 키 버전만 저장한다. **DI가 제공되지 않으면 CI·전화번호로 자동 대체하지 않고 중단·보고**한다(계약상 DI 제공 여부는 E-001 미확인). 키 교체: 새 버전으로 기록하고, 조회는 보관 중인 모든 버전으로 계산해 비교한 뒤 일치하면 현재 버전 값으로 갱신(전환). DI HMAC도 동일인 구별 정보로 보고 접근 제한·보관·파기 대상으로 둔다. ② 이름·전화번호 등 필요한 개인정보만 **AES-256-GCM**(96bit 랜덤 nonce, 128bit 태그, 키 버전 저장, 버전별 키 보관으로 교체 후에도 복호화). ③ 키는 환경 비밀(`<PREFIX>_KEYS`=`v1:<base64url>,…`, `<PREFIX>_KEY_CURRENT`)로만, CSRF·DI HMAC·암호화 키링은 서로 분리(같은 키 거부). ④ 보관 기간은 **미확정**: 실제 개인정보 수집·판매 개시 전 법령 확인 후 개인정보처리방침과 함께 확정(E-006). 구현은 개인정보 컬럼의 선택적 파기(UPDATE로 비움), 주문·결제 기록과 인증 개인정보의 보존 목적 분리, DB 관계로 인한 영구 보존 방지, 원문 없는 파기 이력, 백업 파기 정책 검토를 전제로 한다. 로그·오류·테스트 출력에 원문 금지. | Q-002, Q-016, E-006 |
+| A-044 | **브라우저 바인딩·CSRF bootstrap(사용자 승인 2026-11-24, 구현 Step 4).** 바인딩 값 = 256bit 난수 base64url(43자), 원본은 저장하지 않고 행에는 SHA-256 hex만. 쿠키 `__Host-nz_bind`: Secure·HttpOnly·Path=/·SameSite=Lax·Domain 없음·Max-Age 30일·자동 갱신 없음(유효한 쿠키는 재발급·재설정하지 않음). 형식이 틀리거나 중복된 쿠키는 새로 발급. 모든 환경에서 같은 속성(local은 http://localhost 보안 컨텍스트). CSRF 토큰 = `v<N>.` + HMAC-SHA256(CSRF 전용 키, 용도 분리 레이블 + 바인딩 값), stateless, 보관 중인 버전은 검증 허용, timing-safe 비교. 상태 변경 요청은 `Origin`이 `NAZIR_APP_ORIGIN`과 정확히 일치해야 하고(누락·`null`·불일치 거부), `Sec-Fetch-Site`가 있으면 `same-origin`이어야 한다. `NAZIR_APP_ORIGIN`·CSRF 키: 형식 오류는 모든 환경에서 기동 거부, 누락은 staging·production 기동 거부, local·test는 기동하되 사용 시 500(기본값 없음). production·staging은 https만, local·test는 https 또는 http://localhost·127.0.0.1만. NICE callback은 쿠키·CSRF가 아닌 별도 state·무결성·재전송 방지 검증(§3.4). | API §3.1, §3.3, §4.1 |
+| A-045 | **Rate limit 저장소(Q-013 확정, 사용자 결정 2026-11-24).** PostgreSQL 공유 카운터 테이블. 원자적 증가(단일 `INSERT … ON CONFLICT DO UPDATE`), DB 시각 기준 창, IP 원문 대신 HMAC 식별값, 바인딩 등 추가 기준, 만료·정리 작업, 임의 키로 인한 무한 증가 방지, 저장소 장애 시 민감한 인증 요청 fail-closed. 서버리스 메모리 전용 금지. NICE 토큰 캐시는 별도 테이블(별도 암호화·만료·접근 제한). 수치는 Q-013 권장안을 초기 설정값으로. 구현 전. | Q-013, Q-031 |
+| A-046 | **Preview 보호(H2, 사용자 결정 2026-11-24).** Vercel Deployment Protection. 실제 DB를 Preview에 연결하기 전 활성화, 우회 접근은 필요한 인원에게만, 공개 전 rate limit 검증. Vercel 설정은 사용자가 직접 변경(개발 측이 변경하지 않음). | H2 |
 
 ### 2.1 Step 2 구현 결정 D1~D8 [채택 — 사용자 승인 2026-11-16]
 
@@ -124,6 +128,7 @@
 - **근거:** 7분 점유 + 3분 결제 보호 + 공연·좌석 탐색 시간을 고려하면 10분 이하는 재인증 빈도가 높고, 1시간 이상은 공용 PC 등에서 세션 탈취 위험이 커진다.
 - **조회(LOOKUP) 세션 권장:** 10분, 읽기 전용.
 - **결정 담당/기한:** 사용자 / 인증사 계약 검토 시. **상태:** 30분 고정은 D-015로 확정. NICE 측 제약은 확인 필요(E-001).
+- **결정(2026-11-24, A-043):** DI HMAC(키 버전 포함), CI·원본 미저장. DI 미제공 시 자동 대체 없이 중단·보고.
 - **NICE 원문 확인(2026-11-15):** 접근토큰 24시간, 인증 URL·`transaction_id` 10분 유효. 인증 결과를 서비스 세션으로 유지하는 데 대한 제약 기술은 찾지 못함 → **미확인**(PROVIDERS §2.2).
 
 ### Q-002. 동일인 식별값
@@ -214,7 +219,7 @@
 - **권장안:** 주문 확인서 접근 세션(`order_access_sessions`) = 해당 회차 종료 후 24시간까지(최대 30일). 관리자 세션 = 유휴 30분/절대 12시간. Rate limit은 IP·바인딩·인증 주체 단위로 설정(인증 시작 IP당 10회/10분 등은 초안 수치).
 - **인증 세션 주문 생성 제한(D-015, 수치 권장):** BOOKING 세션당 주문 생성 3회, 인증 주체·회차당 시간당 주문 생성 5회. 초과 시 재인증 또는 대기. 이 제한은 남용 방지용이며 무결성 규칙이 아니므로 rate limit 저장소로 관리하고, 동시 요청 경합 시 소폭 초과를 허용한다(DB 컬럼 추가 없음).
 - **저장소:** Phase 1은 PostgreSQL 기반 카운터(별도 인프라 불필요) 또는 관리형 Redis 중 선택. 서버리스 메모리 기반 rate limit은 금지. NICE 접근토큰 공유 캐시(A-028)도 같은 저장소 결정에 포함.
-- **상태:** 미결정.
+- **상태:** **저장소 확정(2026-11-24, A-045): PostgreSQL 카운터, 토큰 캐시는 별도 테이블.** 수치는 권장안을 설정값으로 시작.
 
 ### Q-014. Google Sheets 역반영
 - **권장안:** Phase 1에서는 Sheets를 **읽기 전용 mirror**로 운영하고 역반영(운영 메모 → DB)을 구현하지 않는다. 운영 메모는 관리자 화면에서 입력(`orders.admin_memo`).
@@ -227,7 +232,7 @@
 
 ### Q-016. 개인정보 저장 방식
 - **권장안:** 전화번호·이름은 애플리케이션 레벨 암호화(키 관리: 호스팅 secret manager 또는 KMS), 조회는 인증 주체 기준으로 하므로 전화번호 검색 인덱스는 두지 않는다. Sheets에는 마스킹된 전화번호만 전송.
-- **상태:** 미결정(키 관리 방식, 보관·파기 기간과 함께 결정).
+- **상태:** **암호화·키 관리 확정(2026-11-24, A-043).** 보관·파기 기간은 미확정(판매 개시 전 확정 필요, E-006).
 
 ### Q-017. 카카오페이 추가 시점
 - **사실(원문):** 카카오페이는 전자결제 계약 이후 MID로 발급받은 테스트 키로만 테스트 가능(PROVIDERS §1.5).
@@ -404,4 +409,5 @@
 | 1.2.5 | 2026-11-18 | A-039 보강: CHECK `payments_unapproved_method_matches_request_ck` 추가(미승인 결제의 `method_type`은 요청 수단과 같아야 함). 다른 결정은 변경 없음 |
 | 1.2.6 | 2026-11-18 | A-042 신설(PR #2 기술 리뷰 후속): 승인된 결제의 승인 증거 불변, 환불 핵심 필드 불변과 `SEAT` 환불 합계 검사, Prisma CLI 환경 가드. A-041의 refunds UPDATE 허용은 유지. 다른 결정은 변경 없음 |
 | 1.2.7 | 2026-11-18 | A-042 ③ 보강: Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사하고 주 DB와 같은 DB를 거부. 다른 결정은 변경 없음 |
+| 1.2.9 | 2026-11-24 | Step 4 착수 결정: A-043(Q-002 DI HMAC, Q-016 AES-256-GCM·키 분리, 보관 기간 미확정), A-044(바인딩·CSRF bootstrap), A-045(Q-013 PostgreSQL rate limit), A-046(H2 Vercel Deployment Protection). 다른 결정은 변경 없음 |
 | 1.2.8 | 2026-11-22 | Step 3 구현 중 남은 미결정 사항 Q-030(`CLOSED` 공연 노출, 임시 기본값 숨김)·Q-031(공개 API 캐시·rate limit)·Q-032(`BLOCKED`만 남은 회차 표시)·Q-033(판매 불가 사유 우선순위) 기록. 확정된 결정은 변경 없음 |
