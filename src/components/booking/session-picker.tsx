@@ -9,14 +9,15 @@ import type { BookingSessionView, SessionState } from "@/server/booking/session-
 
 /**
  * A3-1 회차 선택: 컴팩트 월간 달력 + 선택 날짜의 회차 목록 + 선택 요약.
- * - 회차 상태는 서버 값(state)을 그대로 표시한다. 선택 가능 여부도 state === "AVAILABLE"로만 정한다.
+ * - 회차 상태는 서버 값(state)을 그대로 표시한다. 선택 가능 여부는 서버의 sellable로만 정한다.
  * - 잔여 좌석 수는 회차 API가 제공하지 않으므로 표시하지 않는다(R-E).
  * - "다음"은 선택한 회차 ID를 sessionStorage에 저장하고 A3-2(/booking/verify)로 이동한다.
  *   유효한 예매 인증 세션이 있으면 A3-3으로 건너뛰어야 하지만, 세션 조회 API가 없어 지금은 항상 A3-2로 간다.
  */
 
 const STATE_LABEL: Record<SessionState, string> = {
-  AVAILABLE: "예매 가능",
+  ON_SALE: "예매 가능",
+  TEMPORARILY_UNAVAILABLE: "일시 품절",
   SOLD_OUT: "매진",
   UPCOMING: "판매 예정",
   PAUSED: "판매 일시 중지",
@@ -29,6 +30,7 @@ const monthLabelFmt = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul",
 function note(s: BookingSessionView): string | null {
   if (s.state === "UPCOMING") return s.opensAt ? `${fullFmt.format(new Date(s.opensAt))} 오픈` : "오픈 일정 추후 안내";
   if (s.state === "PAUSED") return "잠시 후 다시 확인해 주세요";
+  if (s.state === "TEMPORARILY_UNAVAILABLE") return "다른 고객의 결제가 진행 중인 좌석입니다. 잠시 후 다시 확인해 주세요."; // 확정 문구(2026-11-21, 백엔드 labels.ts HELD_SEAT_NOTICE)
   if (s.state === "CANCELED") return "이 회차 공연이 취소되었습니다";
   return null;
 }
@@ -41,7 +43,7 @@ export function SessionPicker({ sessions, dev, showTitle }: { sessions: BookingS
       byDay.set(k, [...(byDay.get(k) ?? []), s]);
     }
     const days = new Map<string, CalendarDay>();
-    for (const [key, list] of byDay) days.set(key, { key, hasSessions: true, hasAvailable: list.some((s) => s.state === "AVAILABLE") });
+    for (const [key, list] of byDay) days.set(key, { key, hasSessions: true, hasAvailable: list.some((s) => s.sellable) });
     const months = [...new Set([...byDay.keys()].map((k) => k.slice(0, 7)))];
     return { byDay, days, months };
   }, [sessions]);
@@ -108,7 +110,7 @@ export function SessionPicker({ sessions, dev, showTitle }: { sessions: BookingS
           </h2>
           <div role="radiogroup" aria-labelledby="session-title" className="flex flex-col gap-2 lg:gap-2.5">
             {daySessions.map((s) => {
-              const selectable = s.state === "AVAILABLE";
+              const selectable = s.sellable;
               const checked = s.id === selectedId;
               const n = note(s);
               return (

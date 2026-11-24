@@ -8,7 +8,7 @@ import type { SeatMapResult } from "./seat-types";
  * A3-3 좌석 배치·상태·구매 가능 수 조회.
  * - 운영: 좌석 API·인증 세션 검증이 준비되지 않았으므로 "not-ready"(좌석 선택·점유 불가).
  * - local/test: [DEV] 개발용 좌석 데이터. 개발용 모듈은 이때만 동적으로 불러온다.
- * - 판매 가능한 회차(AVAILABLE)가 아니면 "invalid-session".
+ * - 판매 가능한 회차(서버 sellable)가 아니면 "invalid-session".
  */
 export async function getSeatMap(sessionId: string | undefined): Promise<SeatMapResult> {
   await connection();
@@ -34,7 +34,7 @@ export async function getOrderView(orderId: string | undefined): Promise<OrderVi
 export async function findDevSession(sessionId: string | undefined, opts: { anyState?: boolean } = {}) {
   if (!sessionId) return null;
   const { devSessionFixture } = await import("@/server/dev/dev-session-fixture");
-  return devSessionFixture(new Date()).find((s) => s.id === sessionId && (opts.anyState || s.state === "AVAILABLE")) ?? null;
+  return devSessionFixture(new Date()).find((s) => s.id === sessionId && (opts.anyState || s.sellable)) ?? null;
 }
 
 /** A3-4 결제수단 목록(실제로는 GET /payment-methods). */
