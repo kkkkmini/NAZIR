@@ -30,7 +30,7 @@
 | INV-6 | 결제별 `refunded_amount` ≤ `approved_amount` |
 | INV-7 | hold·항목·티켓·환불 항목의 주문·좌석·회차 소속 일치 |
 | INV-8 | `order_items` 생성 후 변경·삭제 없음 |
-| INV-9 | `SOLD` 좌석에 live(`ACTIVE`/`CONFIRMING`) hold가 없다 *(DB 미보장 — Step 5 서비스·동시성 테스트와 정합성 검사로 확인, S2)* |
+| INV-9 | `SOLD` 좌석에 live(`ACTIVE`/`CONFIRMING`) hold가 없다 *(DB 보장 2026-11-28 — guard A/B 트리거, §3.2 S2-*, DATABASE §19.14)* |
 | INV-10 | 종료 주문(`CANCELED`/`EXPIRED`/`UNFULFILLED`/`REFUNDED`)에 live hold가 없고, 유효 티켓은 `SOLD` 좌석·소유 항목과 일치한다 *(DB 미보장 — Step 9 정합성 검사, S5)* |
 | INV-11 | `PRIMARY` 결제 ⇔ 주문의 확정 결제, 주문당 `PRIMARY` ≤ 1, `PRIMARY` 승인 금액 = 요청 금액 = 주문 총액 *(DB 보장 — 사후 확인용)* |
 | INV-12 | 주문 `total_amount` = 항목 가격 합계, 항목 수 1~`max_seats_per_identity` *(DB 미보장 — 주문 생성 트랜잭션·정합성 검사)* |
@@ -213,7 +213,7 @@ SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검
 
 | 항목 | 내용 | 반영 Step | 테스트 |
 |---|---|---|---|
-| S2 | `SOLD` 좌석에 `ACTIVE`/`CONFIRMING` hold를 넣을 수 있다(DB 미보장). 주문 생성의 AVAILABLE 검사(§11.2 4단계)를 우회하는 경로가 없어야 한다. DB 방어(constraint trigger)의 가능성도 Step 5 시작 전 재검토 | Step 5 | SEAT-04·05의 `SOLD` 변형 신설, INV-9, 동시 요청 시험 |
+| S2 | `SOLD` 좌석에 `ACTIVE`/`CONFIRMING` hold를 넣을 수 있다(DB 미보장). 주문 생성의 AVAILABLE 검사(§11.2 4단계)를 우회하는 경로가 없어야 한다. DB 방어(constraint trigger)의 가능성도 Step 5 시작 전 재검토. **→ DB 방어 구현(2026-11-28, A-053 ③, §3.2)** | Step 5 | SEAT-04·05의 `SOLD` 변형 신설, INV-9, 동시 요청 시험 |
 | S5 | 종료 주문의 live hold, 미판매 좌석의 `ISSUED` 티켓 | Step 9 | INV-10 정합성 검사 + review case |
 | S7 | Prisma가 트리거 오류(`23001`)를 `P2003`으로 위장하고 제약 이름은 `meta.driverAdapterError.cause`에 있음 | Step 5 시작 전 | 오류 매핑 단위 테스트: 모든 `DB_CONSTRAINT`가 의도한 도메인 오류로 변환 |
 | S8 | MIG-06 검사기 개선: 같은 migration에서 같은 이름으로 다시 만드는 `DROP`+`ADD`(CHECK 어휘 확장)는 허용하되 진짜 제거는 계속 검출 | 별도 테스트 개선 | `findProtectedDrops` 합성 케이스 확장 |
@@ -341,6 +341,36 @@ v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌�
 | TX-U09 | 서버 기동: Pool 기본값 기록 / 잘못된 값·순서 | 기동·로그(비밀값 없음) / `process.exit(1)` |
 
 **결과(2026-11-25):** unit 449 passed(396 → +53), DB 537 passed(514 → +23). TX DB 테스트는 4회 반복 실행에서 모두 통과.
+
+### 3.2 Step 5 단위 2: 좌석·hold 불변조건(S2)과 이력 보호(A-041 확장) (A-053 ③ ⑦)
+
+실제 PostgreSQL 16 + Prisma adapter(예약 트랜잭션 러너): `tests/contract/schema/seat-hold-invariants.test.ts`. 계약 매니페스트에 트리거 7개 추가(`manifest.ts`).
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| S2-01 | `AVAILABLE` 좌석에 `ACTIVE`·`CONFIRMING` hold 생성 | 성공 |
+| S2-02/03 | `SOLD`·`BLOCKED` 좌석에 live hold 생성 / 이미 종료된 hold(`RELEASED`) 생성 | 23514 → 문맥 `SEAT_UNAVAILABLE`(규칙 없으면 500), hold 없음 / 허용(live 아님) |
+| S2-04 | 종료된 hold를 `SOLD` 좌석에서 다시 `ACTIVE`로 | 거부, 원상태 |
+| S2-05 | hold의 좌석 변경 UPDATE | 복합 FK가 거부(좌석 변경은 DB 경로 아님) |
+| S2-06 | 다른 연결이 좌석을 잠근 상태에서 hold 생성 / `ACTIVE→CONFIRMING` | 트리거가 좌석 잠금을 기다림(lock timeout → 503) / 좌석 잠금과 무관하게 즉시 성공 |
+| S2-07 | hold 없는 좌석·종료 hold만 있는 좌석 `SOLD` | 성공 |
+| S2-08 | live `ACTIVE`·`CONFIRMING` hold가 있는 좌석 `SOLD` | UPDATE는 수락, COMMIT 거부(23514), 좌석·로그 롤백 |
+| S2-09 | 주문 만료 시각이 지난 `ACTIVE` hold | 여전히 live라 `SOLD` 거부, 같은 트랜잭션에서 `EXPIRED`로 바꾸면 `SOLD` 성공 |
+| S2-10 | 판매 경로: `CONFIRMING→CONVERTED` + `SOLD`(두 순서) | 성공 |
+| S2-11 | REPEATABLE READ·SERIALIZABLE에서 `SOLD` | COMMIT 거부(hold 없어도) |
+| S2-12 | REPEATABLE READ 판매자 스냅샷 이후 hold 커밋 | 판매자 거부, hold 유지 |
+| S2-13a | hold가 먼저 좌석을 잠금 | 판매자가 **대기**(pg_stat_activity로 확인) 후 COMMIT 거부, hold 유지 |
+| S2-13b | 판매자가 먼저 좌석을 잠금 | hold가 **대기** 후 거부, 주문 트랜잭션 전체 롤백 |
+| S2-13c | 먼저 잠근 쪽이 롤백(양방향) | 기다리던 쪽 성공 |
+| S2-14 | 동시 시작 30회(선행 측을 번갈아 둠) | 매회 정확히 하나만 성공, 양방향 승리가 모두 발생, 불변조건 위반 0 |
+| S2-15 | 겹치는 2석 주문 8건 동시(`lockSeatsSorted`) | deadlock·lock timeout 0, 성공 주문은 2석 모두, 좌석당 live hold ≤ 1, 항목 없는 주문 없음 |
+| A41-01~04 | `order_status_logs`·`seat_status_logs` UPDATE·DELETE | 23001(러너 문맥 매핑·원시 연결 모두), 행 불변 |
+| A41-05 | `seat_holds` DELETE | 23001, hold 유지 |
+| A41-06 | 이력 INSERT, hold 상태 UPDATE(`RELEASED`) | 성공 |
+| A41-07 | 이력이 있는 주문 DELETE | FK RESTRICT(기존) |
+| S2-M1~M4, A41-M1 | 변이: guard A 무력화 / guard A의 `FOR SHARE` 제거 / guard B 삭제 / guard B의 READ COMMITTED 검사 제거 / 이력·hold 트리거 삭제 | 각각 위 시나리오가 **위반을 재현**(테스트가 결함을 잡음을 확인) |
+
+**결과(2026-11-28):** 파일 단독 28 passed × 10회(S2-14는 회당 30라운드). 전체 DB 565 passed(537 → +28), unit 449 passed. 전체 실행에서 간헐적인 `Unhandled Errors`(57P01, 기존 Step 4 테스트 파일의 정리 순서 문제 — 이번 변경과 무관)는 별도 과제로 남김.
 
 ## 4. P0 주문/세션/Idempotency
 
@@ -832,3 +862,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.12 | 2026-11-22 | Step 3 공개 조회 API·화면: §2.5 CAT-API-01~06·CAT-UI-01·CAT-08b, 뮤테이션·수동 확인 결과, `verify:db-session` 스크립트와 PgBouncer 결과. 기존 시나리오 정의는 변경 없음 |
 | 1.2.13 | 2026-11-22 | 통합 리뷰 즉시 수정 반영: CAT-API-07(좌석 정렬), PAGE-01~06(페이지 계층·오류 경계·서버 기동) 신설, 뮤테이션·오류 경계 재시도 실측 결과. 기존 시나리오 정의는 변경 없음 |
 | 1.2.14 | 2026-11-25 | §3.1 Step 5 단위 1 TX-01~12·TX-U01~U09 신설(예약 트랜잭션 러너·잠금 헬퍼·오류 분류·Pool 설정). 기존 시나리오 정의는 변경 없음 |
+| 1.2.15 | 2026-11-28 | §3.2 S2-01~15·A41-01~07·변이 S2-M1~M4·A41-M1 신설, INV-9를 DB 보장으로 갱신, §2.2 S2 행 갱신. 기존 시나리오 정의는 변경 없음 |

@@ -362,6 +362,14 @@ export const IMMUTABLE_TRIGGERS = [
   // A-048: the erasure log is append-only
   { name: "pii_erasure_logs_no_update", table: "pii_erasure_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
   { name: "pii_erasure_logs_no_delete", table: "pii_erasure_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  // A-053 ⑦ (A-041 extension): status history is append-only, holds are never physically deleted
+  { name: "order_status_logs_no_update", table: "order_status_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "order_status_logs_no_delete", table: "order_status_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "seat_status_logs_no_update", table: "seat_status_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "seat_status_logs_no_delete", table: "seat_status_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  { name: "seat_holds_no_delete", table: "seat_holds", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
+  // A-053 ③ S2 guard A: a live hold needs an AVAILABLE seat (seat locked FOR SHARE). ROW(1) | BEFORE(2) | INSERT(4) | UPDATE(16)
+  { name: "seat_holds_live_seat_guard", table: "seat_holds", tgtype: 1 | 2 | 4 | 16, function: "seat_holds_check_seat_available" },
 ];
 
 /**
@@ -377,4 +385,6 @@ export const CONSTRAINT_TRIGGERS = [
   // PR #2 review: SEAT refund total = sum of its items (checked at COMMIT). tgtype: ROW(1) | INSERT(4)
   { name: "refunds_items_guard", table: "refunds", tgtype: 1 | 4, function: "refunds_check_items" },
   { name: "refund_items_refund_guard", table: "refund_items", tgtype: 1 | 4, function: "refund_items_check_refund" },
+  // A-053 ③ S2 guard B: a seat set to SOLD has no live hold at COMMIT. tgtype: ROW(1) | UPDATE(16)
+  { name: "session_seats_sold_hold_guard", table: "session_seats", tgtype: 1 | 16, function: "session_seats_check_sold_no_live_hold" },
 ];

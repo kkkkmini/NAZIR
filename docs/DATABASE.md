@@ -1225,6 +1225,7 @@ PG는 서버 승인(confirm)형을 전제로 한다[외부 확인 E-002]. PG con
 | 위험 | DB 최종 방어 |
 |---|---|
 | 같은 좌석 동시 점유 | `seat_holds` partial unique `(session_seat_id) WHERE status IN ('ACTIVE','CONFIRMING')` |
+| `SOLD`·`BLOCKED` 좌석에 live hold 생성 / live hold가 남은 좌석의 `SOLD` (S2) | `seat_holds_live_seat_guard`(BEFORE ROW, 좌석 `FOR SHARE` 후 `AVAILABLE` 요구) + 지연 constraint trigger `session_seats_sold_hold_guard`(COMMIT 시 live hold 없음, READ COMMITTED 요구) [A-053 ③, §19.14] |
 | 동일인 한도 초과 | `purchase_quotas` CHECK + 행 잠금 |
 | 동일 회차 활성 주문 중복 | `orders` partial unique |
 | 진행 중 결제 중복 | `payments` partial unique |
@@ -1237,6 +1238,7 @@ PG는 서버 승인(confirm)형을 전제로 한다[외부 확인 E-002]. PG con
 | 인증 세션의 주체·용도·브라우저 바인딩 불일치 | 4열 복합 FK `identity_sessions` → `identity_verifications (id, identity_subject_id, purpose, browser_binding_hash)` [A-035, A-040] |
 | 세션이 `CONSUMED` 아닌 인증을 가리킴 / `CONSUMED` 인증에 세션 없음 | 지연 constraint trigger 2개(`identity_sessions_claim_guard`, `identity_verifications_claim_guard`, 커밋 시점) [A-040] |
 | 주문 항목 변경·삭제 | `order_items` UPDATE/DELETE 차단 트리거 |
+| 상태 이력 변경·삭제, hold 물리 삭제 | `order_status_logs`·`seat_status_logs` UPDATE/DELETE 차단, `seat_holds` DELETE 차단(23001) [A-053 ⑦] |
 | 결제 행 삭제, 승인 금액·승인 시각 없는 `SUCCEEDED` | `payments` DELETE 차단 트리거, `SUCCEEDED` 승인 금액·승인 시각 CHECK [A-038] |
 | 감사·결제 상태 로그·환불 항목의 수정·삭제, 환불 행 삭제 | `admin_audit_logs`·`payment_status_logs`·`refund_items` UPDATE/DELETE 차단 트리거, `refunds` DELETE 차단 트리거 [A-041] |
 | 승인된 결제의 승인 증거 수정·강등 | `payments` 승인 증거 불변 트리거(`SUCCEEDED` 이후 `approved_amount`·`approved_at`·수단·PG 거래 식별값·`status` 등) [A-042] |
@@ -1383,6 +1385,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.8 | 2026-11-20 | Step 3: `timestamptz` 세션 시간대 해석 문제(S11) 실측(§19.5)과 앱·트랜잭션·seed 연결의 `TimeZone=UTC` 고정(§19.12). 스키마·migration·seed 데이터 변경 없음 |
 | 1.2.9 | 2026-11-21 | Neon Pooled(`DATABASE_URL`)/Direct(`DATABASE_URL_UNPOOLED`) 연결 분리와 쌍 검증(§19.12). 스키마·migration 변경 없음 |
 | 1.2.10 | 2026-11-25 | §19.11 COMMIT 시점 오류 설명 정정(제약 이름 없음, 실측), §19.13 Step 5 예약 트랜잭션 기반(러너·잠금 헬퍼·오류 분류·Pool 설정) 추가. 스키마·migration 변경 없음 |
+| 1.2.11 | 2026-11-28 | §19.14 S2 좌석·hold 불변조건 트리거와 A-041 확장(상태 이력 append-only, hold DELETE 차단), §13.3·§19.8 갱신. migration `20261128120000_seat_hold_invariants` |
 
 ---
 
@@ -1532,8 +1535,8 @@ D1~D8은 §19 초안에서 구현자가 고른 사항이었고, 사용자가 아
 - `refund_items.amount ≤ order_items.price`와 항목당 환불 1건(§7.5)은 교차 행 규칙이라 환불 트랜잭션이 검증한다. `refunds.total_amount = SUM(refund_items.amount)`(`SEAT`)와 `PAYMENT_EXCESS` 항목 없음은 DB가 COMMIT에서 검사한다(A-042) — 환불 서비스는 커밋 실패(`23514`, `refunds_seat_items_total_ck`)를 도메인 오류로 변환해야 한다.
 - `orders.total_amount = SUM(order_items.price)`와 항목 수 1~`max_seats_per_identity`는 DB가 검사하지 않는다. 결제 금액 보장(S3)은 `total_amount`가 올바르다는 전제 위에 있으므로 주문 생성 트랜잭션과 INV 테스트가 책임진다.
 - `purchase_quotas.counted_seats`가 §5.7 규칙의 파생값과 일치하는지(`QUOTA_MISMATCH` 감시)는 정기 검사.
-- **좌석 SOLD ↔ live hold, 종료 주문의 hold, 미판매 좌석의 티켓**의 교차 정합성(S2·S5)은 DB가 막지 않는다(후속 Step).
-- **보호하지 않은 원장성 테이블**(A-041의 한정 범위): `tickets`·`seat_holds`·`order_status_logs`·`seat_status_logs`·`payment_webhook_events`는 아직 삭제·수정할 수 있고, `orders`는 삭제할 수 있다(자식 행이 없는 경우). 각각 보존 정책(Q-016)·운영 절차(상태 전이·재처리)와 얽혀 있어 이번 범위에서 제외했다. 결정은 해당 테이블의 서비스가 구현되는 Step에서 한다.
+- **좌석 SOLD ↔ live hold(S2)는 2026-11-28부터 DB가 막는다**(§19.14, A-053 ③). 서비스의 `lockSeatsSorted` + `AVAILABLE` 확인은 그대로 1차 방어이자 올바른 오류(`SEAT_UNAVAILABLE`)·잠금 순서를 위한 것이고, 트리거는 우회 경로·버그·동시 변경에 대한 최종 방어다. **종료 주문의 hold, 미판매 좌석의 티켓**(S5)은 여전히 DB가 막지 않는다(Step 9).
+- **보호하지 않은 원장성 테이블**(A-041의 한정 범위, 2026-11-28 A-053 ⑦로 `order_status_logs`·`seat_status_logs`의 UPDATE/DELETE와 `seat_holds`의 DELETE를 추가 차단): `tickets`·`payment_webhook_events`는 아직 삭제·수정할 수 있고, `seat_holds`는 상태 전이를 위해 UPDATE할 수 있으며, `orders`는 삭제할 수 있다(자식 행이 없는 경우). 각각 보존 정책(Q-016)·운영 절차(상태 전이·재처리)와 얽혀 있어 이번 범위에서 제외했다. 결정은 해당 테이블의 서비스가 구현되는 Step에서 한다.
 - 승인 증거는 `SUCCEEDED` 이후 DB가 불변으로 지킨다(A-042). 따라서 **승인 값을 잘못 기록했을 때 UPDATE로 고칠 수 없다**: 승인 시 한 번에 올바른 값을 쓰는 것이 서비스의 의무이고, 정정은 별도 정정 절차(감사 로그 §9.3 + 관리자 전용 migration 권한)로만 한다. 이 절차는 Step 8에서 설계한다.
 - **인증 claim의 시간 정책**: `claim_expires_at`·`expires_at` 판단은 서비스가 Clock으로 한다. DB는 시간에 따른 상태 변경을 하지 않는다(지연 트리거는 상태 관계만 검사한다).
 - **원문 라벨의 의미 검증**: `provider_method_raw` CHECK는 9자리 이상 숫자·`@`·제어문자 같은 명백한 위험만 막는다. 라벨이 PG가 실제로 보낸 값인지, 마스킹이 충분한지는 adapter와 서비스 책임이다.
@@ -1633,4 +1636,38 @@ npm run test:db
 - **Prisma `timeout`은 실행 중인 문장을 멈추지 않는다**(1초 문장이 끝난 뒤 COMMIT에서 실패). 그래서 `statement_timeout < transaction timeout`, `lock_timeout < statement_timeout`을 설정 규칙으로 강제한다.
 - **Pool 설정** `src/server/config/db-pool-config.ts`(M8): `NAZIR_DB_POOL_MAX`·`_CONNECTION_TIMEOUT_MS`·`_IDLE_TIMEOUT_MS`·`_TX_MAX_WAIT_MS`·`_TX_TIMEOUT_MS`·`_STATEMENT_TIMEOUT_MS`·`_LOCK_TIMEOUT_MS`. local/test 개발 기본값(5 / 5000 / 10000 / 2000 / 10000 / 5000 / 2000), staging/production은 전부 필수(누락 시 기동 거부, 요청 시점에도 fail-closed). 운영 수치는 **미확정**: Neon pooled 연결 한도와 Vercel 최대 인스턴스 수(E-007)를 받은 뒤 `인스턴스 수 × NAZIR_DB_POOL_MAX < 한도`로 정한다. 그 전에는 Production 준비 완료로 표시하지 않는다.
 - **로그**: 트랜잭션 이름·분류·SQLSTATE·제약 이름·시도 횟수만. 메시지·파라미터는 기록하지 않는다(TX-11: 고객 이름·전화번호가 든 CHECK 오류에서 확인).
-- **남은 일**: S2 교차 불변조건·A-041 로그 보호 migration, Q-025 sequence, 주문 생성 API는 별도 단위. Neon pooler(트랜잭션 모드)에서 `set_config(…, true)`·`FOR UPDATE`·지연 trigger 동작은 미검증(§19.10-5).
+- **남은 일**: S2 교차 불변조건·A-041 로그 보호 migration(→ §19.14 완료), Q-025 sequence, 주문 생성 API는 별도 단위. Neon pooler(트랜잭션 모드)에서 `set_config(…, true)`·`FOR UPDATE`·지연 trigger 동작은 미검증(§19.10-5).
+
+### 19.14 Step 5 단위 2: 좌석·hold 불변조건(S2)과 이력 보호(A-041 확장) (2026-11-28, A-053 ③ ⑦)
+
+migration `20261128120000_seat_hold_invariants`(raw SQL, `BEGIN; … COMMIT;`). Prisma schema 변경 없음(트리거·함수는 schema.prisma에 표현되지 않음, A-019). 기존 함수·트리거와 이름 충돌 없음(새 함수 2개, 새 트리거 7개, 기존 `ledger_reject_update/delete` 재사용).
+
+**live hold의 정의**는 기존 그대로 `status IN ('ACTIVE','CONFIRMING')`(partial unique `seat_holds_active_seat_uq`, 쿼터 카운터, 관리자 차단과 같음). `seat_holds`에는 만료 시각 컬럼이 없고(만료는 `orders.hold_expires_at`, A-007), **주문 만료 시각이 지난 `ACTIVE` hold도 `expireOrder`가 `EXPIRED`로 바꾸기 전까지 live**다(§5.7, §11.2 사전 정리, SEAT-09). 트리거는 시각을 비교하지 않는다. `CONFIRMING`은 시각과 무관하게 live(D-003).
+
+| 객체 | 종류 | 규칙 |
+|---|---|---|
+| `seat_holds_live_seat_guard` → `seat_holds_check_seat_available()` | BEFORE ROW INSERT / UPDATE OF `status`, `session_seat_id` | 새 live hold(INSERT, 비 live → live, 다른 좌석으로 이동)면 좌석 행을 `FOR SHARE`로 읽고 `AVAILABLE`이 아니면 23514. live → live 같은 좌석(`ACTIVE`↔`CONFIRMING`)은 검사·잠금 없음 |
+| `session_seats_sold_hold_guard` → `session_seats_check_sold_no_live_hold()` | 지연 constraint trigger, AFTER UPDATE OF `status` WHEN `NEW.status = 'SOLD'` | COMMIT 시 최종 상태가 `SOLD`이면: 트랜잭션이 READ COMMITTED가 아니면 23514, 그 좌석에 live hold가 있으면 23514 |
+| `order_status_logs_no_update` / `_no_delete`, `seat_status_logs_no_update` / `_no_delete` | BEFORE ROW | `ledger_reject_update/delete`(23001) |
+| `seat_holds_no_delete` | BEFORE ROW DELETE | `ledger_reject_delete`(23001). 상태 UPDATE는 허용 |
+
+**왜 이렇게 했나**
+- **guard A를 BEFORE로**: 좌석 잠금을 hold 행·unique 인덱스 항목보다 먼저 잡는다. 그래서 "hold 인덱스 항목을 쥔 채 좌석을 기다리는" 역순 대기(→ 다른 hold 작성자와 deadlock)가 생기지 않는다.
+- **`FOR SHARE`**: `session_seats` UPDATE의 행 잠금과 충돌하므로 hold 생성과 `SOLD`/`BLOCKED` 전환이 좌석 행에서 직렬화된다. 먼저 잠근 쪽이 이기고 다른 쪽은 기다린 뒤 거부된다(READ COMMITTED: 갱신된 좌석을 다시 읽음 / guard B가 커밋된 hold를 봄. REPEATABLE READ 이상의 hold 작성자: 스냅샷 이후 갱신된 좌석이면 40001).
+- **guard B를 지연(COMMIT 시점)으로**: 판매 확정(Tx2, §11.7)은 좌석 `SOLD`와 hold `CONFIRMING → CONVERTED`를 한 트랜잭션에서 어느 순서로든 쓴다. 최종 상태만 의미가 있다. 함수는 현재 행을 다시 읽는다.
+- **guard B의 READ COMMITTED 요구**: COMMIT 시점 조회가 다른 트랜잭션이 커밋한 hold를 보려면 READ COMMITTED여야 한다. REPEATABLE READ 판매자는 스냅샷 이후 커밋된 hold를 보지 못해 둘 다 커밋될 수 있다(S2-M4로 재현). booking 쓰기는 이미 READ COMMITTED만 쓴다(A-029). 이 요구는 그 규칙을 DB가 `SOLD` 전환에 대해 강제하는 것이다.
+- **잠금 순서(§13.2)**: 서비스는 좌석을 `lockSeatsSorted`(`FOR UPDATE`, id 순)로 먼저 잠근 뒤 hold를 쓴다. 이미 `FOR UPDATE`로 잡은 행에 대한 트리거의 `FOR SHARE`는 추가 대기가 없다. `ACTIVE→CONFIRMING`(Tx1) 등 live → live는 트리거가 좌석을 잠그지 않으므로 기존 순서 그대로다(S2-06으로 확인). 비 live → live UPDATE는 hold 행을 잡은 뒤 좌석을 잠그지만, 상태 전이표(§12.3)상 종료 상태에서 live로 돌아가는 경로는 없다.
+- **좌석 변경 UPDATE**: hold의 `(order_item_id, order_id, session_seat_id)` 복합 FK가 불변인 `order_items`를 가리키므로 hold만 다른 좌석으로 옮기는 UPDATE는 FK가 거부한다(S2-05). guard A는 이 경우도 새 좌석을 검사하지만 DB 계약상 서비스 경로가 아니다. 이번 단위는 이 계약을 바꾸지 않았다.
+- **기존 데이터**: migration이 한 번 "AVAILABLE이 아닌 좌석의 live hold"를 검사하고, 있으면 migration 전체가 실패한다(트랜잭션).
+- **오류 코드**: 23514(이름은 지정했지만 드라이버가 전달하지 않음, §19.13) → 주문 트랜잭션 문맥에서 `SEAT_UNAVAILABLE`로 매핑. 23001 → 문맥 매핑 또는 500.
+
+**서비스와 DB의 역할**
+
+| | 서비스(Step 5 주문·Step 6 판매) | DB 트리거 |
+|---|---|---|
+| 목적 | 정상 경로의 판단·오류 메시지·잠금 순서(`lockSeatsSorted` 후 `AVAILABLE` 확인, 사전 정리 `expireOrder`) | 우회 경로·버그·동시 변경에서도 INV-9 유지(최종 방어) |
+| 실패 시 | 409 `SEAT_UNAVAILABLE`을 직접 반환 | 23514 → 러너가 문맥 규칙으로 같은 409, 규칙이 없으면 500. 트랜잭션 전체 롤백 |
+
+**보호 범위 밖(관리 작업)**: `TRUNCATE`(트리거가 실행되지 않음), 테이블 소유자·슈퍼유저의 `ALTER TABLE … DISABLE TRIGGER`·`session_replication_role = replica`, 함수 교체(`CREATE OR REPLACE FUNCTION`). 앱 DB 역할에서 이 권한을 빼는 것은 Step 10(S9, 역할 분리)이다. 일반 애플리케이션 경로(INSERT/UPDATE/DELETE)는 위 트리거가 모두 막는다.
+
+**테스트**: `tests/contract/schema/seat-hold-invariants.test.ts` 28개(S2-01~15, A41-01~07, 변이 S2-M1~M4·A41-M1). 동시성: 보유 측 선점·판매 측 선점·선점 측 롤백, 동시 시작 30회(양방향 승리를 단언), REPEATABLE READ 판매자, 정렬 잠금 다중 좌석 8건 동시 — 모두 실제 PostgreSQL 16 + Prisma adapter.
