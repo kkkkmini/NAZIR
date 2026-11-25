@@ -188,6 +188,21 @@
 
 **콜백:** `GET|POST /identity-verifications/callback/{provider}` — 쿠키 미사용. NICE는 `web_transaction_id`를 전달한다(기본 GET). 서버는 저장된 문맥으로 `POST /ido/intc/v1.0/auth/result`를 호출하고, 응답을 adapter 내부에서 복호화·무결성 검증한다. 성공 시 정규화 결과(이름·휴대폰 번호·동일인 식별값 HMAC)로 `VERIFIED`(subject 결정, `claim_expires_at` 설정), 실패·검증 불일치 시 `FAILED` → 303 `/identity/complete?vid={id}`. 결과 요청 가능 기한·재조회 가능 여부·토큰 동일성 요건은 **미확인**이다.
 
+**구현(Step 4, 2026-11-26, A-050)** — `src/server/identity/callback.ts`, `GET` 만(Mock 계약). 쿠키를 읽지 않고 세션을 발급하지 않는다.
+
+| 조건 | 상태 전이 | 응답 |
+|---|---|---|
+| state 누락·형식 오류·중복, 미지 state, provider 불일치 | 없음 | 303 `/identity/complete` (vid 없음) |
+| PENDING 아님(재전송·동시 요청) | 없음 | 303 `?vid=` |
+| 만료(DB 시각) | PENDING → EXPIRED (`EXPIRED_BEFORE_CALLBACK`) | 303 `?vid=` |
+| 결과 무결성 실패·이상 값 | PENDING → FAILED (`INTEGRITY_FAILED`) | 303 `?vid=` |
+| 사용자 취소 / 인증 실패 | PENDING → FAILED (`USER_CANCELED` / `PROVIDER_FAILED`) | 303 `?vid=` |
+| DI 없음 | PENDING → FAILED (`DI_UNAVAILABLE`), 대체 없음 | 303 `?vid=` |
+| provider 일시 장애, 전이 중 오류 | 없음(롤백, PENDING 유지) | 303 `?vid=` |
+| 성공 | PENDING → VERIFIED (subject, 암호화 이름·전화, `verified_at`, `claim_expires_at` +5분 권장값) | 303 `?vid=` |
+
+모든 응답 `Cache-Control: no-store`, `Referrer-Policy: no-referrer`. Mock 전용: `/identity/mock?txn=`, `POST /api/v1/mock/identity/complete`(local·test만, 그 외 404). **NICE 미확정:** 복귀 메서드(GET/POST), `web_transaction_id` 외 전달 값, `return_url` query 보존, 결과 요청 기한·재조회 가능 여부·토큰 동일성, 결과 필드 형식(이름·전화 정규화 규칙).
+
 생년월일·성별 등 정책상 필요 없는 결과 항목은 adapter에서 폐기하고 도메인·DB·로그로 전달하지 않는다.
 
 **Claim:** `POST /identity-verifications/{id}/claim` (CSRF 필수)

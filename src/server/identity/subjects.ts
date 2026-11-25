@@ -42,7 +42,7 @@ export async function resolveSubjectInTx(tx: SqlExecutor, ring: Keyring, di: unk
   const current = candidates.find((c) => c.current)!;
   const lockOrder = [...candidates].sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
   for (const c of lockOrder) {
-    await tx(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`identity_subject:${SUBJECT_KEY_TYPE}:${c.hash}`]);
+    await tx(`SELECT 1 AS "locked" FROM pg_advisory_xact_lock(hashtextextended($1, 0))` /* not the void value itself: Prisma cannot decode a void column */, [`identity_subject:${SUBJECT_KEY_TYPE}:${c.hash}`]);
   }
   const rows = await tx<{ id: string; key_version: number }>(
     `SELECT s."id", s."key_version" FROM "identity_subjects" s

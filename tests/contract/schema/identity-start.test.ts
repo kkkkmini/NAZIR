@@ -35,6 +35,9 @@ afterEach(async () => {
 });
 
 const ORIGIN = "http://localhost:3000";
+const notUsed = async (): Promise<never> => {
+  throw new Error("completeVerification is not used by the start tests");
+};
 const key = () => randomBytes(32).toString("base64url");
 const CSRF_KEY = key();
 const security = loadSecurityConfig({ NAZIR_APP_ORIGIN: ORIGIN, NAZIR_CSRF_KEYS: `v1:${CSRF_KEY}`, NAZIR_CSRF_KEY_CURRENT: "v1" }, "test");
@@ -221,7 +224,7 @@ describe("START rate limits (A-047: IP 60/10min, binding 5/10min)", () => {
 });
 
 describe("START provider failures", () => {
-  const failing = (err: Error): IdentityProvider => ({ name: "MOCK", startVerification: async () => { throw err; } });
+  const failing = (err: Error): IdentityProvider => ({ name: "MOCK", completeVerification: notUsed, startVerification: async () => { throw err; } });
 
   it("START-10 provider unavailable → 503 PROVIDER_UNAVAILABLE; the row is FAILED with no context", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -236,6 +239,7 @@ describe("START provider failures", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const bad = (launchUrl: string, txn = "mock_abc"): IdentityProvider => ({
       name: "MOCK",
+      completeVerification: notUsed,
       startVerification: async () => ({ providerTransactionId: txn, launch: { type: "redirect", url: launchUrl }, validForMs: null, context: {} }),
     });
     for (const p of [failing(new ProviderRejectedError("denied")), bad("https://evil.example/phish"), bad("javascript:alert(1)"), bad(`${ORIGIN}/x`, "bad id with spaces")]) {
@@ -270,6 +274,7 @@ describe("START duplicates, expiry and state", () => {
     let calls = 0;
     const slow: IdentityProvider = {
       name: "MOCK",
+      completeVerification: notUsed,
       startVerification: async (i) => {
         calls++;
         await gate;
@@ -328,6 +333,7 @@ describe("START duplicates, expiry and state", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const late: IdentityProvider = {
       name: "MOCK",
+      completeVerification: notUsed,
       startVerification: async (i) => {
         await db.query(`UPDATE identity_verifications SET created_at = now() - interval '11 minutes', expires_at = now() - interval '1 minute' WHERE id = $1`, [i.verificationId]);
         return new MockIdentityProvider("test", ORIGIN).startVerification(i);
@@ -355,7 +361,7 @@ describe("START duplicates, expiry and state", () => {
     const ip = freshIp();
     const r = req({ ip });
     await call(r);
-    await call(req({ ip }), deps({ provider: { name: "MOCK", startVerification: async () => { throw new Error("boom " + r.binding); } } }));
+    await call(req({ ip }), deps({ provider: { name: "MOCK", completeVerification: notUsed, startVerification: async () => { throw new Error("boom " + r.binding); } } }));
     const all = logs.join("\n");
     for (const s of [r.binding!, CSRF_KEY, ip]) expect(all).not.toContain(s);
   });

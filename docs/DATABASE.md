@@ -547,6 +547,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 - `UNIQUE (id, identity_subject_id, purpose, browser_binding_hash)` — 인증 세션 복합 FK 대상(주체·용도에 **브라우저 바인딩**까지 포함) [채택 A-035, A-040]
 - 인덱스 `(browser_binding_hash, created_at)`, `(status, expires_at)`
 - `UNIQUE (state_nonce_hash)`(`identity_verifications_state_nonce_uq`), 부분 unique `(browser_binding_hash, purpose) WHERE status = 'PENDING'`(`identity_verifications_pending_binding_uq`) [채택 A-049, migration `20261126120000_identity_start`]. 대체된 시작은 `EXPIRED` + `failure_code='SUPERSEDED'`, provider 실패는 `FAILED` + `PROVIDER_UNAVAILABLE`/`PROVIDER_REJECTED`
+- Callback 전이 [A-050]: `PENDING → VERIFIED`(subject·암호화 이름·전화·`verified_at`·`claim_expires_at`), `PENDING → FAILED`(`USER_CANCELED`·`PROVIDER_FAILED`·`INTEGRITY_FAILED`·`DI_UNAVAILABLE`), `PENDING → EXPIRED`(`EXPIRED_BEFORE_CALLBACK`). 어느 경우든 `provider_context_encrypted`는 NULL, `browser_binding_hash`는 그대로. 스키마 변경 없음
 
 저장 최소화: 인증사 원본 응답 전체를 저장하지 않는다. 생년월일·성별·CI 등은 구매 한도·연락에 필요하지 않으면 저장하지 않는다. 필요 필드는 인증사 계약 확인 후 확정한다[외부 확인 E-001, E-006].
 

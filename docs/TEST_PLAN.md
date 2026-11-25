@@ -509,6 +509,36 @@ Unit `tests/unit/identity-provider.test.ts`(IDP-U01~05), DB·API `tests/contract
 
 **결과(2026-11-26):** unit 390 passed, DB 459 passed.
 
+### 6.5 Mock 인증·Callback (Step 4, A-050) — `tests/contract/schema/identity-callback.test.ts`
+
+실제 PostgreSQL, 실제 시작·Mock 제어·Callback 핸들러를 순서대로 실행한다.
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| CB-01 | Mock 페이지 거래 조회 | PENDING MOCK만, 미지·형식 오류·비활성 환경은 없음 |
+| CB-02 | 비활성(staging·production) | 제어 라우트 404, Mock 생성 거부 |
+| CB-03 | 제어 라우트 | 타 Origin·Origin 없음 403, 미지 결과·임의 DI 400, 두 번째 완료 410, 저장된 callback으로만 이동 |
+| CB-04 | 성공 | VERIFIED, DI HMAC subject, 이름·전화 암호화, claim 5분, context 삭제, 바인딩 보존, state 없는 303 |
+| CB-05·06 | 취소·실패 | FAILED(코드), subject·개인정보 없음 |
+| CB-07 | 같은 인물 재인증 | 같은 subject |
+| CB-08·09 | state 누락·형식·중복·미지 | 상태 불변 |
+| CB-10 | 다른 provider | 상태 불변 |
+| CB-11 | 위조(결과 토큰 없음·불일치) | FAILED `INTEGRITY_FAILED` |
+| CB-12 | 만료 | EXPIRED |
+| CB-13 | 재전송 | `ALREADY_PROCESSED`, 행 불변 |
+| CB-14 | 같은 state 동시 20회 | VERIFIED 1회, subject 최대 1개 |
+| CB-15 | 같은 신규 인물의 서로 다른 거래 동시 완료 | subject 1개 |
+| CB-16 | 전이 트랜잭션 중 오류 | 롤백(PENDING, subject 없음), 재시도 성공 |
+| CB-17 | provider 장애 | PENDING 유지 |
+| CB-18 | DI 없음 | FAILED `DI_UNAVAILABLE`, 대체 없음 |
+| CB-19 | 이상 값 | `INTEGRITY_FAILED` |
+| CB-20 | 다른 브라우저 바인딩 세션 | DB가 거부(4열 FK) |
+| CB-21 | 쿠키 | 읽지도 설정하지도 않음 |
+| CB-22 | 로그 | state·결과 토큰·DI·이름·전화 없음 |
+| CB-23 | 앱 Prisma 트랜잭션 경유 전체 흐름 | 성공(void 컬럼 회귀 방지) |
+
+**결과(2026-11-26):** unit 390 passed, DB 483 passed. 실제 Chromium(`next start`, test 환경, 새 DB): bootstrap → 시작 200 → Mock 화면 → 인물 A → 303 연쇄 → `/identity/complete?vid=`(state·토큰 없음), DB `VERIFIED`·암호화·context 삭제, 사용한 거래의 Mock 화면은 not-found, 타 Origin 제어 403, 서버 로그에 state·토큰·이름 없음.
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |

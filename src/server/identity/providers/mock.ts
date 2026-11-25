@@ -7,9 +7,23 @@
  * - Start takes NO identity input from the user. Whatever the Mock later "verifies" comes from fixed fake test data on
  *   the server, never from a DI/CI/name the request supplies, so nobody can claim to be someone else through it.
  * - Deterministic for tests: transaction ids come from the injected random source.
+ *
+ * Completion contract (A-050) — the Mock's stand-in for "the provider confirms the result server-side":
+ *   the mock page's complete action (local/test-only control route) stores the chosen outcome and the SHA-256 of a
+ *   fresh 256-bit result token in the encrypted context, then redirects to the stored callback URL with
+ *   `mock_result=<token>`. completeVerification accepts the outcome only if that token matches (timing-safe).
+ *   A forged callback without the token, or with another transaction's token, is rejected as an integrity failure.
  */
-import { randomBytes } from "node:crypto";
-import type { IdentityProvider, StartVerificationInput, StartVerificationResult } from "./types";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { MOCK_PERSONAS, isMockOutcome } from "./mock-personas";
+import {
+  ProviderRejectedError,
+  type CompleteVerificationInput,
+  type IdentityProvider,
+  type StartVerificationInput,
+  type StartVerificationResult,
+  type VerificationOutcome,
+} from "./types";
 
 export class MockProviderNotAllowedError extends Error {
   constructor(runtimeEnv: string) {
@@ -43,5 +57,19 @@ export class MockIdentityProvider implements IdentityProvider {
       validForMs: null,
       context: { mock: "1", returnUrl: input.returnUrl, purpose: input.purpose },
     };
+  }
+
+  async completeVerification(input: CompleteVerificationInput): Promise<VerificationOutcome> {
+    const ctx = input.context;
+    const token = input.callback.query.get("mock_result");
+    if (ctx.mock !== "1" || !ctx.resultTokenHash || !isMockOutcome(ctx.outcome) || !token || !/^[A-Za-z0-9_-]{43}$/.test(token))
+      throw new ProviderRejectedError("mock_result_missing");
+    const given = createHash("sha256").update(token).digest();
+    const expected = Buffer.from(ctx.resultTokenHash, "hex");
+    if (expected.length !== given.length || !timingSafeEqual(given, expected)) throw new ProviderRejectedError("mock_result_integrity");
+    if (ctx.outcome === "cancel") return { kind: "CANCELED" };
+    if (ctx.outcome === "fail") return { kind: "FAILED" };
+    const persona = MOCK_PERSONAS[ctx.outcome.slice("success:".length) as keyof typeof MOCK_PERSONAS];
+    return { kind: "VERIFIED", di: persona.di, name: persona.name, phone: persona.phone };
   }
 }

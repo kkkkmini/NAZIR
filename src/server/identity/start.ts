@@ -140,7 +140,7 @@ export async function handleStartVerification(request: Request, deps: StartDeps)
 
     // 6
     const pending = await deps.tx(async (tx) => {
-      await tx(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`identity_start:${bindingHash}:${purpose}`]);
+      await tx(`SELECT 1 AS "locked" FROM pg_advisory_xact_lock(hashtextextended($1, 0))` /* not the void value itself: Prisma cannot decode a void column */, [`identity_start:${bindingHash}:${purpose}`]);
       const open = await tx<{ id: string; in_flight: boolean }>(
         `SELECT "id", ("provider_transaction_id" IS NULL AND "created_at" > now() - $3::int * interval '1 millisecond') AS in_flight
            FROM "identity_verifications"

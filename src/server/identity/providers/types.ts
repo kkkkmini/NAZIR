@@ -2,8 +2,8 @@
  * IdentityProvider contract (A-049). The same contract for the Mock provider and the NICE adapter; nothing NICE-specific
  * (request_no, transaction_id, tokens) appears here — adapters keep such values in their opaque `context`.
  *
- * This step covers START only. Callback/result normalisation (VERIFIED/FAILED, DI, name, phone) is added with the
- * callback step and is deliberately not declared yet, so no shape is guessed before the NICE contract is confirmed.
+ * Start (A-049) and callback completion (A-050). The completion result is the provider-neutral, NORMALISED outcome;
+ * adapters drop every field the policy does not need (birthdate, gender, CI, …) before returning.
  */
 export type ProviderName = "MOCK" | "NICE";
 export type VerificationPurpose = "BOOKING" | "LOOKUP";
@@ -43,7 +43,31 @@ export class ProviderRejectedError extends Error {
   }
 }
 
+/** What reached the callback endpoint. GET query for MOCK; NICE's method (GET/POST) is unconfirmed (PROVIDERS §2.2). */
+export interface CallbackInput {
+  query: URLSearchParams;
+}
+
+export interface CompleteVerificationInput {
+  /** The decrypted per-transaction context this adapter returned at start (plus anything it stored since). */
+  context: Record<string, string>;
+  callback: CallbackInput;
+}
+
+/**
+ * Normalised result.
+ * - VERIFIED: the provider confirmed a person. `di` is required — there is no CI/phone fallback (A-043).
+ * - CANCELED: the user closed/cancelled the provider window.
+ * - FAILED: the provider reports a failed verification.
+ * A result that fails integrity checks is NOT a FAILED outcome: the adapter throws ProviderRejectedError.
+ */
+export type VerificationOutcome =
+  | { kind: "VERIFIED"; di: string; name: string; phone: string }
+  | { kind: "CANCELED" }
+  | { kind: "FAILED" };
+
 export interface IdentityProvider {
   readonly name: ProviderName;
   startVerification(input: StartVerificationInput): Promise<StartVerificationResult>;
+  completeVerification(input: CompleteVerificationInput): Promise<VerificationOutcome>;
 }
