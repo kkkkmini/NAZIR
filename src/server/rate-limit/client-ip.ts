@@ -59,6 +59,11 @@ export function normalizeIp(ip: string): string | null {
   if (t.some((p) => p.includes("."))) return null; // embedded IPv4 other than ::ffff: — reject, no guessing
   const groups = lower.includes("::") ? [...h, ...Array(8 - h.length - t.length).fill("0"), ...t] : h;
   if (groups.length !== 8) return null;
+  const n = groups.map((g) => parseInt(g, 16));
+  // IPv4-mapped written in hex (::ffff:cb00:7109) is the IPv4 client too, not the shared ::/64 bucket.
+  if (n.slice(0, 5).every((x) => x === 0) && n[5] === 0xffff) {
+    return [n[6] >> 8, n[6] & 255, n[7] >> 8, n[7] & 255].join(".");
+  }
   return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":") + "::/64";
 }
 

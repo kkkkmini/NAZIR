@@ -8,6 +8,7 @@ import { Pool, type PoolClient } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it, vi } from "vitest";
 import { parseKeyring } from "../../../src/server/lib/secrets";
 import { parsePolicyOverrides } from "../../../src/server/rate-limit/policies";
+import { resolveClientIp } from "../../../src/server/rate-limit/client-ip";
 import { RateLimiter, rateLimitKey } from "../../../src/server/rate-limit/service";
 import { deleteExpiredCounters, hitCounter, type SqlExecutor } from "../../../src/server/rate-limit/store";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
@@ -103,6 +104,45 @@ describe("RL-05..07 separation and privacy", () => {
     // DB CHECKs refuse a raw value or a free-form policy
     await expect(db.query(`INSERT INTO rate_limit_counters(policy,key_hash,window_started_at,expires_at,count) VALUES ('identity.start.ip',$1,now(),now()+interval '1 s',1)`, [IP])).rejects.toMatchObject({ code: "23514" });
     await expect(db.query(`INSERT INTO rate_limit_counters(policy,key_hash,window_started_at,expires_at,count) VALUES ('Bad Policy!',$1,now(),now()+interval '1 s',1)`, [rateLimitKey(keys, "x", [["ip", IP]])])).rejects.toMatchObject({ code: "23514" });
+  });
+});
+
+describe("RL-13/14 A-047 confirmed identity-start policies", () => {
+  const ipOf = (raw: string) => resolveClientIp(new Headers({ "x-vercel-forwarded-for": raw }), { kind: "vercel" });
+  const confirmed = () => new RateLimiter({ exec: execOf(pool), keys, policies: new Map() }); // no overrides: A-047 values
+
+  it("RL-13 one IPv6 /64 is one bucket (privacy addresses), another /64 is independent; mapped IPv4 = IPv4", async () => {
+    const l = confirmed();
+    for (let i = 0; i < 60; i++) {
+      const d = await l.consume("identity.start.ip", [["ip", ipOf(`2001:db8:aa:1:${(i + 1).toString(16)}:0:0:1`)]]);
+      expect(d.allowed).toBe(true);
+    }
+    expect((await l.consume("identity.start.ip", [["ip", ipOf("2001:db8:aa:1:dead:beef:0:9")]])).allowed).toBe(false);
+    expect((await l.consume("identity.start.ip", [["ip", ipOf("2001:db8:aa:2::9")]])).allowed).toBe(true);
+    expect((await l.consume("identity.start.ip", [["ip", ipOf("::ffff:198.51.100.40")]])).remaining).toBe(59);
+    expect((await l.consume("identity.start.ip", [["ip", ipOf("198.51.100.40")]])).remaining).toBe(58);
+    expect((await db.query(`SELECT count(*)::int n FROM rate_limit_counters`)).rows[0].n).toBe(3);
+  });
+
+  it("RL-14 a shared public IP: many browsers each get 5, the network as a whole gets 60", async () => {
+    const l = confirmed();
+    const shared = ipOf("203.0.113.200");
+    const results: string[] = [];
+    // IP first, binding only when the IP passed (API_SPEC §7)
+    for (let b = 0; b < 15; b++) {
+      const binding = randomBytes(32).toString("base64url");
+      for (let i = 0; i < 6; i++) {
+        const ip = await l.consume("identity.start.ip", [["ip", shared]]);
+        if (!ip.allowed) {
+          results.push("ip");
+          continue;
+        }
+        results.push((await l.consume("identity.start.binding", [["binding", binding]])).allowed ? "ok" : "binding");
+      }
+    }
+    expect(results.filter((r) => r === "ok")).toHaveLength(50); // 10 browsers × 5, within the first 60 network hits
+    expect(results.filter((r) => r === "binding")).toHaveLength(10); // each browser's 6th try
+    expect(results.filter((r) => r === "ip")).toHaveLength(30); // the network limit of 60 then stops the rest
   });
 });
 

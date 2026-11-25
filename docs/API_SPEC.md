@@ -450,7 +450,7 @@ v1.0의 `/admin/orders/review-required`, `/admin/orders/{id}/resolve`, `/admin/o
 ## 7. 보안 및 운영
 
 - 쿠키 기반 API CSRF 방어(§3.3), HTTPS, CORS allowlist(관객·관리자 출처만).
-- Rate limit 구현 기반(A-045, 2026-11-24): `RateLimiter.enforce(policy, [[dimension, value]])` — PostgreSQL 공유 카운터, 키는 HMAC. IP 정책을 먼저, 바인딩 정책은 IP 통과 후 검사(클라이언트가 고르는 바인딩 값으로 행이 무한히 늘지 않게). 아직 어떤 API에도 적용하지 않음(인증 시작 API에서 처음 적용).
+- Rate limit 구현 기반(A-045, 2026-11-24): `RateLimiter.enforce(policy, [[dimension, value]])` — PostgreSQL 공유 카운터, 키는 HMAC. IP 정책을 먼저, 바인딩 정책은 IP 통과 후 검사(클라이언트가 고르는 바인딩 값으로 행이 무한히 늘지 않게). 아직 어떤 API에도 적용하지 않음(인증 시작 API에서 처음 적용). 인증 시작 수치 확정(A-047): IP(IPv4 /32·IPv6 /64) 60회/10분, 바인딩 5회/10분, 초과 시 429 + `Retry-After`. 바인딩 기준은 보조 방어일 뿐 사람 식별 수단이 아니다.
 - Rate limit [권장 Q-013, 수치 미정]: 인증 시작(IP·바인딩), claim, 주문 생성·취소 반복(인증 주체·회차), **BOOKING 세션당 주문 생성 횟수·주체/회차 시간당 주문 생성 횟수(D-015, 권장 3회 / 시간당 5회)**, 결제 시작, 결제 상태 조회 재조회 트리거, 관리자 로그인, 좌석 조회(IP). 저장소는 공유 저장소(PostgreSQL 또는 Redis)이며 서버리스 메모리 기반 금지. NICE 인증은 건당 과금되므로(원문) 인증 시작 rate limit은 비용 통제 수단이기도 하다.
 - 좌석 점유 남용 방지 [H6]: 인증 선행(D-004) + 동일인·회차 4석(D-006) + 활성 주문 1건(D-008) + 취소·재생성 반복 rate limit.
 - PG Webhook 서명 검증(보안 키), eventId dedupe, 10초 내 응답, 비동기 조회 기반 처리(§4.9).

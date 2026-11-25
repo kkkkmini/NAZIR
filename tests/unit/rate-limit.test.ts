@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { ClientIpUnavailableError, normalizeIp, parseClientIpSource, resolveClientIp } from "@/server/rate-limit/client-ip";
 import { assertStartupRateLimitConfig, loadRateLimitConfig } from "@/server/rate-limit/config";
-import { POLICY_DRAFTS, RateLimitConfigError, parsePolicyOverrides, resolvePolicy } from "@/server/rate-limit/policies";
+import { CONFIRMED_POLICIES, POLICY_DRAFTS, RateLimitConfigError, parsePolicyOverrides, resolvePolicy } from "@/server/rate-limit/policies";
 import { RateLimitUnavailableError, RateLimiter, rateLimitKey } from "@/server/rate-limit/service";
 import type { SqlExecutor } from "@/server/rate-limit/store";
 import { AppError, ERROR_STATUS } from "@/server/lib/errors";
@@ -43,6 +43,18 @@ describe("RL-U01 trusted client IP", () => {
   it.each(["", "not-an-ip", "203.0.113.7, 10.0.0.1", "999.1.1.1"])("refuses %j (fail-closed, no guessing)", (v) => {
     expect(() => resolveClientIp(new Headers({ "x-vercel-forwarded-for": v }), vercel)).toThrow(ClientIpUnavailableError);
   });
+  it("A-047: addresses in one /64 share a bucket, other /64s do not, IPv4 stays /32", () => {
+    const v = (ip: string) => resolveClientIp(new Headers({ "x-vercel-forwarded-for": ip }), vercel);
+    // privacy (temporary) addresses rotate the interface id inside the same /64
+    expect(v("2001:db8:1:2:a1b2:c3d4:e5f6:7788")).toBe(v("2001:db8:1:2::1"));
+    expect(v("2001:db8:1:2:ffff:ffff:ffff:ffff")).toBe(v("2001:0db8:0001:0002:0000:0000:0000:0000"));
+    expect(v("2001:db8:1:3::1")).not.toBe(v("2001:db8:1:2::1"));
+    expect(v("2001:db8:2:2::1")).not.toBe(v("2001:db8:1:2::1"));
+    expect(v("::ffff:203.0.113.9")).toBe(v("203.0.113.9"));
+    expect(v("::ffff:cb00:7109")).toBe("203.0.113.9");
+    expect(v("0:0:0:0:0:ffff:cb00:710a")).toBe("203.0.113.10");
+    expect(v("203.0.113.9")).not.toBe(v("203.0.113.10"));
+  });
   it("IPv6 is reduced to /64; mapped IPv4 becomes IPv4", () => {
     expect(normalizeIp("2001:db8:abcd:12:1:2:3:4")).toBe("2001:db8:abcd:12::/64");
     expect(normalizeIp("2001:DB8:ABCD:0012::9")).toBe("2001:db8:abcd:12::/64");
@@ -59,10 +71,11 @@ describe("RL-U01 trusted client IP", () => {
 });
 
 describe("RL-U02 policy values are configuration, not code", () => {
-  it("draft defaults resolve; a policy without a draft must be configured", () => {
-    expect(resolvePolicy("identity.start.ip", new Map())).toEqual({ name: "identity.start.ip", limit: 10, windowMs: 600_000 });
-    expect(POLICY_DRAFTS["identity.start.binding"]).toBeNull();
-    expect(() => resolvePolicy("identity.start.binding", new Map())).toThrow(RateLimitConfigError);
+  it("confirmed identity-start values (A-047) and drafts resolve", () => {
+    expect(resolvePolicy("identity.start.ip", new Map())).toEqual({ name: "identity.start.ip", limit: 60, windowMs: 600_000 });
+    expect(resolvePolicy("identity.start.binding", new Map())).toEqual({ name: "identity.start.binding", limit: 5, windowMs: 600_000 });
+    expect(CONFIRMED_POLICIES).toEqual(["identity.start.ip", "identity.start.binding"]);
+    expect(POLICY_DRAFTS["order.create.session"]).toEqual({ limit: 3, windowSec: 1800 });
     const o = parsePolicyOverrides({ NAZIR_RATE_LIMIT_POLICIES: "identity.start.binding=5/600, identity.start.ip=3/60" });
     expect(resolvePolicy("identity.start.binding", o)).toEqual({ name: "identity.start.binding", limit: 5, windowMs: 600_000 });
     expect(resolvePolicy("identity.start.ip", o).limit).toBe(3);
@@ -126,8 +139,8 @@ describe("RL-U05 service outcomes", () => {
     await expect(limiter(broken).consume("identity.start.ip", [["ip", "1.2.3.4"]])).rejects.toBeInstanceOf(RateLimitUnavailableError);
     expect(await err(limiter(broken).enforce("identity.start.ip", [["ip", "1.2.3.4"]]))).toBe("RATE_LIMIT_UNAVAILABLE:503");
     expect(ERROR_STATUS.RATE_LIMIT_UNAVAILABLE).toBe(503);
-    // unconfigured policy is also unavailable (fail-closed), not unlimited
-    expect(await err(limiter(fake(1)).enforce("identity.start.binding", [["binding", "x"]]))).toBe("RATE_LIMIT_UNAVAILABLE:503");
+    // an invalid key part (configuration/programming error) is unavailable (fail-closed), not unlimited
+    expect(await err(limiter(fake(1)).enforce("identity.start.binding", [["Bad-Dim", "x"]]))).toBe("RATE_LIMIT_UNAVAILABLE:503");
     // malformed store answers fail closed too
     expect(await err(limiter(async () => [] as never).enforce("identity.start.ip", [["ip", "1.2.3.4"]]))).toBe("RATE_LIMIT_UNAVAILABLE:503");
   });

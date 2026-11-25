@@ -442,9 +442,13 @@ Unit `tests/unit/rate-limit.test.ts`(RL-U01~U05), DB `tests/contract/schema/rate
 | RL-09 | 동시성 | advisory lock barrier로 50개 트랜잭션 동시 진행: limit 10 → 정확히 10 허용, 남은 값 9..0 각 1회, 행 1개; 최초 INSERT 경합 50/50 정확; 25개 키 독립; 앱 Prisma 풀로 30건 → 7 허용 |
 | RL-10 | 저장소 장애 | 연결 실패·테이블 없음 → 503 `RATE_LIMIT_UNAVAILABLE`, 로그에 IP 없음 |
 | RL-11 | 정리 | 만료 행만 배치 삭제 |
+| RL-13 | A-047 /64 | 같은 /64의 60개 다른 주소가 한 bucket, 다른 /64 독립, mapped IPv4 = IPv4 |
+| RL-14 | 공용 IP 여러 브라우저 | 브라우저마다 5회, 네트워크 전체 60회 |
 | RL-12 | 경계 시각 | `expires_at = now()`는 만료(재시작·삭제), `+1µs`는 유지 |
 
-**결과(2026-11-24):** unit 352 passed, DB 407 passed.
+**결과(2026-11-24):** unit 352 passed, DB 407 passed. 2026-11-25 A-047 반영 후 RL unit 21, RL DB 19 통과.
+
+**미검증(완료로 표시하지 않음):** 실제 Vercel Preview에서 `x-vercel-forwarded-for` 전달, 만료 행 정리 스케줄(미구현).
 
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
