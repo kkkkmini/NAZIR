@@ -40,9 +40,12 @@ import {
   TICKET_STATUS,
   VALID_TICKET_STATUS,
   WEBHOOK_EVENT_STATUS,
+  PII_ERASURE_ACTOR,
+  PII_ERASURE_FIELD,
+  PII_ERASURE_TARGET,
 } from "../../../src/server/db/constants";
 
-/** DATABASE.md §3: 27 core tables + rate_limit_counters (A-045, Q-013). */
+/** DATABASE.md §3: 27 core tables + rate_limit_counters (A-045) + pii_erasure_logs (A-048). */
 export const TABLES = [
   "venues", "shows", "show_sessions", "seats", "session_seats",
   "identity_subjects", "identity_verifications", "identity_sessions",
@@ -53,6 +56,7 @@ export const TABLES = [
   "admins", "admin_sessions", "admin_audit_logs",
   "review_cases", "outbox_events",
   "rate_limit_counters",
+  "pii_erasure_logs",
 ] as const;
 
 // ───────────────────────── MIG-02: partial unique indexes ─────────────────────────
@@ -246,6 +250,15 @@ export const CHECKS: CheckSpec[] = [
   { name: "rate_limit_counters_key_hash_ck", table: "rate_limit_counters", columns: ["key_hash"] },
   { name: "rate_limit_counters_count_ck", table: "rate_limit_counters", columns: ["count"] },
   { name: "rate_limit_counters_window_ck", table: "rate_limit_counters", columns: ["expires_at", "window_started_at"] },
+  // personal-data erasure (A-048)
+  { name: "identity_subjects_erasure_ck", table: "identity_subjects", columns: ["erased_at", "subject_key_hash"] },
+  { name: "identity_verifications_pii_erasure_ck", table: "identity_verifications", columns: ["pii_erased_at", "verified_name", "verified_phone", "provider_context_encrypted"] },
+  { name: "orders_customer_pii_ck", table: "orders", columns: ["customer_pii_erased_at", "customer_name", "customer_phone"] },
+  vocab("pii_erasure_logs", "target_type", PII_ERASURE_TARGET),
+  vocab("pii_erasure_logs", "actor_type", PII_ERASURE_ACTOR),
+  { name: "pii_erasure_logs_actor_admin_ck", table: "pii_erasure_logs", columns: ["actor_type", "admin_id"] },
+  { name: "pii_erasure_logs_reason_ck", table: "pii_erasure_logs", columns: ["reason"] },
+  { name: "pii_erasure_logs_fields_ck", table: "pii_erasure_logs", columns: ["fields"], vocab: PII_ERASURE_FIELD },
 ];
 
 // ───────────────────────── MIG-04: composite foreign keys ─────────────────────────
@@ -331,6 +344,9 @@ export const IMMUTABLE_TRIGGERS = [
   // PR #2 review: approval record of a SUCCEEDED payment, monetary core of a refund
   { name: "payments_approved_evidence_no_change", table: "payments", tgtype: 1 | 16, function: "payments_reject_approved_evidence_change" },
   { name: "refunds_core_no_change", table: "refunds", tgtype: 1 | 16, function: "refunds_reject_core_change" },
+  // A-048: the erasure log is append-only
+  { name: "pii_erasure_logs_no_update", table: "pii_erasure_logs", tgtype: 1 | 2 | 16, function: "ledger_reject_update" },
+  { name: "pii_erasure_logs_no_delete", table: "pii_erasure_logs", tgtype: 1 | 2 | 8, function: "ledger_reject_delete" },
 ];
 
 /**

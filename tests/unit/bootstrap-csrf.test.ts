@@ -205,10 +205,17 @@ describe("Security configuration (fail-closed)", () => {
   });
 
   it("BOOT-12 production/staging: missing origin or keys refuse startup; local/test start but fail on use", () => {
+    // staging/production also need the other three keyrings (A-043, A-045); they are covered in pii-crypto/rate-limit tests
+    const ALL = {
+      ...ENV,
+      NAZIR_RATE_LIMIT_KEYS: `v1:${k()}`, NAZIR_RATE_LIMIT_KEY_CURRENT: "v1",
+      NAZIR_SUBJECT_HMAC_KEYS: `v1:${k()}`, NAZIR_SUBJECT_HMAC_KEY_CURRENT: "v1",
+      NAZIR_PII_ENC_KEYS: `v1:${k()}`, NAZIR_PII_ENC_KEY_CURRENT: "v1",
+    };
     for (const envName of ["production", "staging"]) {
       expect(violations(() => assertStartupSecurityConfig({}, envName)).length).toBeGreaterThan(0);
-      expect(violations(() => assertStartupSecurityConfig({ ...ENV, NAZIR_APP_ORIGIN: "" }, envName))).toEqual(["NAZIR_APP_ORIGIN is required"]);
-      expect(violations(() => assertStartupSecurityConfig(ENV, envName))).toEqual([]);
+      expect(violations(() => assertStartupSecurityConfig({ ...ALL, NAZIR_APP_ORIGIN: "" }, envName))).toEqual(["NAZIR_APP_ORIGIN is required"]);
+      expect(violations(() => assertStartupSecurityConfig(ALL, envName))).toEqual([]);
     }
     for (const envName of ["local", "test"]) {
       expect(violations(() => assertStartupSecurityConfig({}, envName))).toEqual([]);

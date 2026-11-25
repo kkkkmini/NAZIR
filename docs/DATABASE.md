@@ -105,6 +105,12 @@ v1.1 기준 핵심 테이블은 **27개**다. (v1.0: 21개)
 - 정리: `deleteExpiredCounters`(만료 행을 배치로 `SKIP LOCKED` 삭제). 실행 주기·주체(Cron 등)는 미정.
 - 개인정보 없음(HMAC 키를 모르면 원문 역산 불가, 창이 끝나면 의미 없음). FK 없음 — 다른 테이블과 독립.
 
+**29번째 테이블 `pii_erasure_logs`와 파기 컬럼** [채택 A-048, migration `20261125120000_pii_erasure`]:
+- `identity_subjects.subject_key_hash`는 NULL 허용(파기 시에만), `erased_at` 추가, CHECK `identity_subjects_erasure_ck`. 저장값은 DI의 HMAC(base64url 43자)이고 버전은 `key_version`(A-043). 원본 DI·CI 미저장.
+- `identity_verifications.pii_erased_at` 추가, CHECK `identity_verifications_pii_erasure_ck`(파기 후 이름·전화·문맥 재기록 불가). `verified_name`·`verified_phone`은 AES-256-GCM 암호문.
+- `orders.customer_name`·`customer_phone` NULL 허용(파기 후에만), `customer_pii_erased_at` 추가, CHECK `orders_customer_pii_ck`. 세 고객 필드는 AES-256-GCM 암호문.
+- `pii_erasure_logs`: `id`, `target_type`(IDENTITY_VERIFICATION/IDENTITY_SUBJECT/ORDER), `target_id`, `fields`(컬럼 이름 배열, 허용 목록·1개 이상), `reason`(코드 형식), `actor_type`(SYSTEM/ADMIN), `admin_id`(ADMIN일 때만, FK RESTRICT), `created_at`. 인덱스 `(target_type, target_id)`. UPDATE·DELETE 트리거로 차단. **값은 기록하지 않는다.**
+
 ### 3.1 v1.0 대비 변경 요약
 
 | 변경 | 내용 | 근거 |
@@ -1383,7 +1389,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 
 | 항목 | 결과 |
 |---|---|
-| 테이블 | 27개 전부(§3) + `rate_limit_counters`(A-045, 2026-11-24) |
+| 테이블 | 27개 전부(§3) + `rate_limit_counters`(A-045, 2026-11-24) + `pii_erasure_logs`(A-048, 2026-11-25) |
 | 외래 키 | 40개(복합 16개). **전부 `ON DELETE RESTRICT` / `ON UPDATE RESTRICT`**, 즉시 검사, MATCH SIMPLE |
 | CHECK | 55개(상태값 31 + 금액·한도·소유·수단·승인 금액·승인 시각·원문·수단 일치 24) |
 | UNIQUE | 38개(PK·partial 제외). 그중 `seats` 1개는 `NULLS NOT DISTINCT` |

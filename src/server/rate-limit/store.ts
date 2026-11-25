@@ -14,8 +14,8 @@
  * request's time.
  */
 
-/** Parameterised SQL executor. Implemented by node-pg clients and by Prisma ($queryRawUnsafe). */
-export type SqlExecutor = <T>(sql: string, params: unknown[]) => Promise<T[]>;
+import type { SqlExecutor } from "../db/sql";
+export type { SqlExecutor };
 
 export interface HitResult {
   count: number;

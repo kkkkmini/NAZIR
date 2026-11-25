@@ -450,6 +450,37 @@ Unit `tests/unit/rate-limit.test.ts`(RL-U01~U05), DB `tests/contract/schema/rate
 
 **미검증(완료로 표시하지 않음):** 실제 Vercel Preview에서 `x-vercel-forwarded-for` 전달, 만료 행 정리 스케줄(미구현).
 
+### 6.3 개인정보 암호화·DI HMAC·파기 (Step 4, A-043, A-048)
+
+Unit `tests/unit/pii-crypto.test.ts`, DB `tests/contract/schema/pii-subjects.test.ts`. 값은 모두 합성 표지(MARKER)이며 행·로그·오류에 나타나지 않는지 검사한다.
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| PII-U01 | 암복호화 왕복 | 형식 `v<N>.nonce(12B).ct.tag(16B)`, 호출마다 다른 nonce |
+| PII-U02 | 변조(nonce·ct·tag·길이)·다른 필드로 이동 | 거부, 오류에 원문·암호문 없음 |
+| PII-U03 | 잘못된 형식 | 거부 |
+| PII-U04 | 키 교체 | 구버전 복호화, 신규는 current, 없는 버전 거부 |
+| PII-U05 | 빈 값·과대 값·미지 필드 | 거부, 값 미노출 |
+| PII-U06 | DI HMAC | 버전별 결정적, current 우선, DI 없음 → `DiUnavailableError`(대체 없음) |
+| PII-U07 | 키 분리 | 4개 키링 중 어느 둘이 같은 키여도 거부 |
+| PII-U08 | 누락 | staging·production 기동 거부, local은 사용 시 실패, AES 키 32바이트 강제 |
+| SUBJ-01·02 | 생성·재조회 | DI subject 1개, 원문 미저장 |
+| SUBJ-03 | 키 교체 | v1 행을 {v1,v2}에서 찾아 같은 id로 v2 갱신, {v2}만으로 조회 |
+| SUBJ-04·06b | 절차 위반 | 구버전을 먼저 빼거나 {v1} 인스턴스가 남으면 중복 → 다음 조회에서 `SubjectKeyConflictError`(병합 안 함) |
+| SUBJ-05 | 동시 첫 인증 20건 | subject 1개 |
+| SUBJ-06 | 교체 중 current v1·v2 인스턴스 동시 | subject 1개, 하향 갱신 없음 |
+| SUBJ-07 | DI 없음 | 오류, 기록 없음 |
+| SUBJ-08 | 파기된 subject | 매칭 안 됨, 새 subject |
+| ERASE-01 | 저장값 | 암호문, 복호화 일치 |
+| ERASE-02 | 인증 개인정보 파기 | 세션·주문 FK가 있어도 가능, 재기록 CHECK 거부, 재파기는 로그 없음 |
+| ERASE-03·04 | 주문 고객 필드 | 필드별 파기, 주문·금액·상태 유지, 표시 없이 제거 불가 |
+| ERASE-05 | DI HMAC 파기 | subject 행 유지, 주문 연결 유지 |
+| ERASE-06 | 파기 로그 | 컬럼 이름만, 값·암호문 없음, UPDATE·DELETE 거부 |
+| ERASE-07 | 로그 입력 | 자유 텍스트 사유·미지 필드·행위자 불일치 거부 |
+| ERASE-08 | 없는 id | not found, 로그 없음 |
+
+**결과(2026-11-25):** unit 375 passed(PII 22 포함), DB 426 passed(SUBJ·ERASE 17 포함, DRIFT-01 포함).
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |

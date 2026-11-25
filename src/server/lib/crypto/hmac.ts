@@ -8,7 +8,8 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { Keyring } from "../secrets";
 
-function mac(key: Buffer, purpose: string, message: string): Buffer {
+/** Raw purpose-separated HMAC-SHA256 (for values whose key version is stored in a separate column). */
+export function mac(key: Buffer, purpose: string, message: string): Buffer {
   return createHmac("sha256", key).update(`nazir:${purpose}\u0000`).update(message, "utf8").digest();
 }
 

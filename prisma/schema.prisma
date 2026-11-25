@@ -143,9 +143,10 @@ model SessionSeat {
 
 model IdentitySubject {
   id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  subjectKeyHash String   @map("subject_key_hash") @db.VarChar(255) // HMAC only, never the raw DI/CI/phone
+  subjectKeyHash String?  @map("subject_key_hash") @db.VarChar(255) // HMAC only, never the raw DI/CI/phone. NULL only when erased (A-048)
   subjectKeyType String   @map("subject_key_type") @db.VarChar(20) // CHECK: DI | CI | PHONE
   keyVersion     Int      @map("key_version") @db.SmallInt
+  erasedAt       DateTime? @map("erased_at") @db.Timestamptz(6) // A-048: DI HMAC erased (row kept for order FKs)
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -174,6 +175,7 @@ model IdentityVerification {
   claimExpiresAt           DateTime? @map("claim_expires_at") @db.Timestamptz(6)
   expiresAt                DateTime  @map("expires_at") @db.Timestamptz(6)
   failureCode              String?   @map("failure_code") @db.VarChar(100)
+  piiErasedAt              DateTime? @map("pii_erased_at") @db.Timestamptz(6) // A-048
   createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -244,8 +246,9 @@ model Order {
   identitySubjectId     String    @map("identity_subject_id") @db.Uuid
   identitySessionId     String    @map("identity_session_id") @db.Uuid
   status                String    @db.VarChar(30) // CHECK: PENDING | PAYMENT_CONFIRMING | PAYMENT_UNKNOWN | REVIEW_REQUIRED | UNFULFILLED | PAID | CANCELED | EXPIRED | REFUNDED
-  customerName          String    @map("customer_name")
-  customerPhone         String    @map("customer_phone")
+  customerName          String?   @map("customer_name") // AES-256-GCM (A-043); NULL only after erasure (A-048)
+  customerPhone         String?   @map("customer_phone") // AES-256-GCM (A-043); NULL only after erasure (A-048)
+  customerPiiErasedAt   DateTime? @map("customer_pii_erased_at") @db.Timestamptz(6) // A-048
   customerEmail         String?   @map("customer_email") @db.VarChar(254)
   totalAmount           BigInt    @map("total_amount") // CHECK >= 0
   currency              String    @default("KRW") @db.Char(3)
@@ -602,6 +605,7 @@ model Admin {
   refundsPgExecuted   Refund[]         @relation("RefundPgExecutedBy")
   reviewCasesAssigned ReviewCase[]     @relation("ReviewCaseAssignedTo")
   reviewCasesResolved ReviewCase[]     @relation("ReviewCaseResolvedBy")
+  piiErasureLogs      PiiErasureLog[]
 
   @@unique([email], map: "admins_email_uq")
   @@map("admins")
@@ -716,4 +720,22 @@ model RateLimitCounter {
   @@id([policy, keyHash], map: "rate_limit_counters_pkey")
   @@index([expiresAt], map: "rate_limit_counters_expires_idx")
   @@map("rate_limit_counters")
+}
+
+// Personal-data erasure log (DECISIONS A-048, DATABASE.md §3.29). Records WHICH fields of WHICH row were erased, never
+// a value. Append-only: UPDATE and DELETE are rejected by triggers (raw SQL migration).
+model PiiErasureLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  targetType String   @map("target_type") @db.VarChar(40) // CHECK: IDENTITY_VERIFICATION | IDENTITY_SUBJECT | ORDER
+  targetId   String   @map("target_id") @db.Uuid
+  fields     String[] @db.VarChar(40) // CHECK: non-empty, column names from PII_ERASURE_FIELD
+  reason     String   @db.VarChar(50) // CHECK: code format only (no free text)
+  actorType  String   @map("actor_type") @db.VarChar(20) // CHECK: SYSTEM | ADMIN
+  adminId    String?  @map("admin_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  admin Admin? @relation(fields: [adminId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "pii_erasure_logs_admin_fk")
+
+  @@index([targetType, targetId], map: "pii_erasure_logs_target_idx")
+  @@map("pii_erasure_logs")
 }

@@ -150,12 +150,48 @@ export function loadSecurityConfig(env: Env, runtimeEnv: string): SecurityConfig
   return { appOrigin: appOrigin!, csrfKeys: csrfKeys! };
 }
 
+/**
+ * Every keyring the server uses (A-043, A-044, A-045). Each has its own variables, and no key material may appear in
+ * two of them (checked at startup, every environment).
+ */
+export const KEYRING_PREFIXES = ["NAZIR_CSRF", "NAZIR_RATE_LIMIT", "NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC"] as const;
+/** AES-256 needs exactly 32 bytes. */
+export const PII_KEY_BYTES = 32;
+
+export function parsePiiKeyring(env: Env, violations: string[]): Keyring | null {
+  const ring = parseKeyring(env, "NAZIR_PII_ENC", violations);
+  if (!ring) return null;
+  for (const [v, k] of ring.keys) {
+    if (k.length !== PII_KEY_BYTES) {
+      violations.push(`NAZIR_PII_ENC_KEYS: key ${v} must be exactly ${PII_KEY_BYTES} bytes (AES-256)`);
+      return null;
+    }
+  }
+  return ring;
+}
+
+/** Loads one required keyring for use. Missing or malformed → SecretConfigError (callers fail closed). */
+export function loadKeyring(env: Env, prefix: (typeof KEYRING_PREFIXES)[number]): Keyring {
+  const v: string[] = [];
+  const ring = prefix === "NAZIR_PII_ENC" ? parsePiiKeyring(env, v) : parseKeyring(env, prefix, v);
+  if (!ring && v.length === 0) v.push(`${prefix}_KEYS and ${prefix}_KEY_CURRENT are required`);
+  if (v.length > 0) throw new SecretConfigError(v);
+  return ring!;
+}
+
 /** Startup check (src/instrumentation-node.ts, check:config). */
 export function assertStartupSecurityConfig(env: Env, runtimeEnv: string): void {
   const strict = runtimeEnv === "staging" || runtimeEnv === "production";
   const violations: string[] = [];
   parseAppOrigin(env, runtimeEnv, violations);
-  parseKeyring(env, "NAZIR_CSRF", violations);
+  const rings: Keyring[] = [];
+  for (const prefix of KEYRING_PREFIXES) {
+    const ring = prefix === "NAZIR_PII_ENC" ? parsePiiKeyring(env, violations) : parseKeyring(env, prefix, violations);
+    if (ring) rings.push(ring);
+    else if (strict && !env[`${prefix}_KEYS`]?.trim() && !env[`${prefix}_KEY_CURRENT`]?.trim())
+      violations.push(`${prefix}_KEYS and ${prefix}_KEY_CURRENT are required in ${runtimeEnv}`);
+  }
+  assertDistinctKeyrings(rings, violations);
   if (violations.length > 0) throw new SecretConfigError(violations);
   if (strict) loadSecurityConfig(env, runtimeEnv);
 }

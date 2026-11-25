@@ -90,6 +90,19 @@ export const REVIEW_CASE_STATUS = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 export const OUTBOX_STATUS = ["PENDING", "PROCESSING", "SENT", "RETRY", "DEAD", "SUPERSEDED"] as const;
 
 /** D-006: hard ceiling for seats per identity per session (also a DB CHECK). */
+/** A-048: personal-data erasure log (pii_erasure_logs). Field names only, never values. */
+export const PII_ERASURE_TARGET = ["IDENTITY_VERIFICATION", "IDENTITY_SUBJECT", "ORDER"] as const;
+export const PII_ERASURE_ACTOR = ["SYSTEM", "ADMIN"] as const;
+export const PII_ERASURE_FIELD = [
+  "verified_name",
+  "verified_phone",
+  "provider_context_encrypted",
+  "subject_key_hash",
+  "customer_name",
+  "customer_phone",
+  "customer_email",
+] as const;
+
 export const MAX_SEATS_PER_IDENTITY = 4;
 
 /**
