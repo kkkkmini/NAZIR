@@ -557,6 +557,13 @@ DB `tests/contract/schema/identity-claim.test.ts`(**앱 Prisma 클라이언트�
 | CLM-10 | 같은 claim 15회 동시 | 세션 1개, 유효 토큰 1개, 스스로 폐기 없음 |
 | CLM-11 | 같은 브라우저의 다른 인증 2건 동시 claim | ACTIVE 1개, 제약 오류 비노출 |
 | CLM-12 | BOOKING·LOOKUP 분리 | |
+| REC-01 | 복구 창 경계(세션 생성 + 4분59초 성공, 정확히 5분·5분1초 거부) | |
+| REC-02 | `claim_expires_at`과 독립(지나도 5분 안이면 복구, 반대로 claim 창이 열려도 5분 지나면 거부) | |
+| REC-03 | 복구 결과 | 같은 행·만료 불변·CONSUMED 유지·새 hash·이전 토큰 무효 |
+| REC-04 | 동시 복구 10회 | 유효 토큰 1개, 세션 1행 |
+| REC-05 | 사용된 세션 | 복구 거부, 사용 중 토큰 유지 |
+| REC-06·07 | 다른 verificationId(같은 브라우저의 이전 인증, 다른 브라우저의 인증, 세션 없는 id) | 거부, 다른 세션 토큰 불변 |
+| LKP-01 | LOOKUP 10분 고정, 사용해도 불변, `expires_at = now()`면 만료 | |
 | M7-01 | COMMIT 시점 23514 | `DriverAdapterError`, SQLSTATE만(이름 없음) 실측, 매핑; 문장 시점 23505 이름 포함 |
 | M7-02 | claim 트랜잭션이 COMMIT에서 실패 | 422, 인증 VERIFIED 유지, 새 세션 없음, 기존 세션 폐기 안 됨 |
 | M7-03 | 무관한 오류 | 500, 내부 메시지 비노출 |
@@ -570,7 +577,7 @@ DB `tests/contract/schema/identity-claim.test.ts`(**앱 Prisma 클라이언트�
 | SES-08 | 로그 | 토큰·바인딩·이름·전화 없음 |
 | M7-U01 | 오류 형태 3종, 메시지 미사용, 이름 마스킹 | |
 
-**결과(2026-11-27):** unit 396 passed, DB 506 passed. 실제 Chromium(`next start`, test 환경): bootstrap → 시작 → Mock(인물 B) → callback → claim 200(`__Host-nz_idv` HttpOnly·Secure·Lax·30분, JS 비노출) → 세션 조회 200 → 사용 후 재 claim 422 → 로그아웃 204(쿠키 삭제) → 조회 401.
+**결과(2026-11-27):** unit 396 passed, DB 506 passed → A-052 반영 후 DB 514 passed(REC·LKP 8건 추가). 실제 Chromium(`next start`, test 환경): bootstrap → 시작 → Mock(인물 B) → callback → claim 200(`__Host-nz_idv` HttpOnly·Secure·Lax·30분, JS 비노출) → 세션 조회 200 → 사용 후 재 claim 422 → 로그아웃 204(쿠키 삭제) → 조회 401.
 
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 

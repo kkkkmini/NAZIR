@@ -96,7 +96,7 @@
 
 - 좌석 선택 전 본인인증이 필수다. 인증 결과는 서버가 인증사에 재조회·검증하고, **같은 브라우저(바인딩 일치)에서의 1회 claim**으로만 인증 세션이 발급된다.
 - `BOOKING` 세션: 발급 후 **고정 30분**, 활동에 따른 연장(sliding) 없음 [확정 D-015]. 주문 생성·취소·결제·조회 가능. 같은 브라우저에서는 유효기간 안에 재인증 없이 취소 후 재예매할 수 있다. 주문 생성은 잔여 10분 이상일 때만, 세션당·주체/회차 시간당 횟수 제한 내에서만 허용한다(DATABASE §6.3). NICE 측 결과 유지 제약은 미확인(Q-001).
-- `LOOKUP` 세션: 권장 10분, 조회 전용.
+- `LOOKUP` 세션: **고정 10분**(sliding 없음) [확정 A-052], 조회 전용.
 - 모든 관객 API는 요청의 `__Host-nz_idv` hash와 `__Host-nz_bind` hash가 DB 세션과 모두 일치해야 한다. 다른 브라우저로 복사된 세션은 401 `BROWSER_BINDING_MISMATCH`.
 - 세션이 만료돼도 진행 중 주문은 인증 주체에 귀속된다. 같은 사람이 재인증하면 같은 주문을 이어갈 수 있다.
 
@@ -211,7 +211,7 @@
 - 응답: `{ "purpose": "BOOKING", "expiresAt": "…", "displayName": "홍*동" }`.
 - 실패: 다른 브라우저(바인딩 불일치) 401, 재사용(`CONSUMED`) 422 `IDENTITY_VERIFICATION_FAILED`.
 
-**구현(Step 4, 2026-11-27, A-051)** — `src/server/identity/session.ts`. 본문 없음 또는 `{}`(다른 필드 400). 순서: id 형식 400 → 바인딩 401 `BROWSER_BINDING_REQUIRED` → CSRF 403 → (트랜잭션) 없음 404 `NOT_FOUND` → 바인딩 불일치 401 `BROWSER_BINDING_MISMATCH` → `VERIFIED`가 아니거나 창 경과 422 `IDENTITY_VERIFICATION_FAILED`. 성공 200 + `Set-Cookie: __Host-nz_idv=…; Max-Age=<남은 초>; Path=/; Secure; HttpOnly; SameSite=Lax`, `no-store`. `displayName`은 첫·끝 글자만 남긴 마스킹(파기된 경우 null). 같은 브라우저의 응답 유실 재시도는 미사용 세션의 토큰만 교체(A-051 ③).
+**구현(Step 4, 2026-11-27, A-051)** — `src/server/identity/session.ts`. 본문 없음 또는 `{}`(다른 필드 400). 순서: id 형식 400 → 바인딩 401 `BROWSER_BINDING_REQUIRED` → CSRF 403 → (트랜잭션) 없음 404 `NOT_FOUND` → 바인딩 불일치 401 `BROWSER_BINDING_MISMATCH` → `VERIFIED`가 아니거나 창 경과 422 `IDENTITY_VERIFICATION_FAILED`. 성공 200 + `Set-Cookie: __Host-nz_idv=…; Max-Age=<남은 초>; Path=/; Secure; HttpOnly; SameSite=Lax`, `no-store`. `displayName`은 첫·끝 글자만 남긴 마스킹(파기된 경우 null). 같은 브라우저의 응답 유실 재시도는 미사용 세션의 토큰만 교체 — 조건: 같은 verificationId·바인딩, 그 인증의 ACTIVE·미만료·미사용 세션, 최초 claim(세션 생성) 후 5분 이내(DB 시각, `claim_expires_at`과 무관) [A-052].
 - `GET /identity-session` → 200 `{ purpose, expiresAt, displayName }` / 401 `IDENTITY_SESSION_REQUIRED`(없음·만료·폐기·형식 오류) / 401 `BROWSER_BINDING_MISMATCH`(다른 브라우저로 복사된 토큰). `last_used_at`만 갱신.
 - `DELETE /identity-session` (CSRF) → 204 + 세션 쿠키 삭제(같은 속성, `Max-Age=0`), 반복 호출도 204. 두 쿠키가 모두 맞는 세션만 폐기.
 

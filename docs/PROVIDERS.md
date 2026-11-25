@@ -231,6 +231,36 @@
 - [ ] 결과 요청 토큰 동일성, 결과 조회 기한·재조회 가능 여부 확인
 - [ ] 테스트는 과금되는 실제 인증으로만 가능 → 테스트 인원·횟수 계획, 스테이징 개인정보 처리 규칙(Q-019)
 
+### 2.6 NICE 실제 연동 준비 체크리스트 (2026-11-27)
+
+근거는 §2.2~§2.4의 원문(N1 통합인증 가이드, N2 도입 절차)뿐이다. **공식 계약서·이용기관 전용 개발 가이드는 아직 받지 않았다.** 아래 "확인된 사실"은 공개 가이드 기준이며, 계약 후 받는 자료와 다르면 그것을 따른다. 코드에서는 `NiceIdentityProvider`가 시작·완료 모두 `ProviderUnavailableError`로 실패한다(A-049, A-050).
+
+| # | 항목 | 확인된 사실(출처) | 미확정 | 우리 구현에 미치는 영향 / 받아야 할 자료 |
+|---|---|---|---|---|
+| 1 | DI 제공 | 결과 항목에 `di`, `ci`, `ci2` 존재(N1) | 계약상 DI 제공 여부·별도 신청서 필요 여부(N8 비공식), DI 형식·길이 | DI 없으면 인증 실패(A-043, 대체 없음) → **계약서·신청서에서 DI 제공 명시 필요** |
+| 2 | Outbound IP 등록 | 서버 Outbound IP를 NICE에 등록해야 키 발급, 호스트 IP 또는 3자리 대역 prefix, AWS·Cloudflare는 별도 문의(N1) | Vercel 서버리스의 고정 출구 IP 확보 방법(Q-020), 스테이징 IP 별도 등록 여부 | **호스팅의 고정 IP(Static IP/프록시) 확정 → NICE에 제출할 IP 목록** |
+| 3 | client_id/secret | 등록 후 이메일로 전달, 공개 금지(N1, N2) | 운영·테스트 키 구분 여부, 키 교체 절차 | `NICE_CLIENT_ID`·`NICE_CLIENT_SECRET`, `NICE_ALLOWED_CLIENT_IDS`(기동 검사, A-024)에 등록 |
+| 4 | 토큰 발급·캐시·갱신 | `POST /ido/intc/v1.0/auth/token`, Basic(`client_id:client_secret` base64url, 패딩 없음), 24시간 유효, 응답 `access_token`·`iterators`·`ticket`(N1) | 만료 전 재발급 허용·이전 토큰 동시 유효 여부, 발급 횟수 제한, 폐기 API | 공유 토큰 캐시(별도 테이블·별도 암호화, A-028/A-045) 설계 필요. 결과 복호화에 `ticket`·`iterators`가 쓰이므로 **인증 시작 때 쓴 토큰을 결과 시점까지 보관**해야 할 가능성 |
+| 5 | request_no | 20~50자, 필수(N1) | 허용 문자, 고유성 범위·기간, 재사용 규칙 | verification id에서 결정적으로 만들 계획(adapter 내부). 문자 규칙 확인 필요 |
+| 6 | 인증 시작 필드 | `request_no`, `return_url`(≤250자), `close_url`, `svc_types`(휴대폰 `M`), `method_type`(GET/POST, 기본 GET); 응답 `transaction_id`·인증 URL 10분 유효(N1) | 그 밖의 필수/선택 필드, 오류 코드 목록, 인증 URL을 여는 방식(팝업·전체 이동·모바일 앱) | 현재 계약 `startVerification → launch.url`(A-049)에 맞음. 10분 TTL은 이미 반영 |
+| 7 | Callback 방식 | `method_type`으로 GET(query) 또는 POST(body)에 `web_transaction_id` 전달(N1) | 어느 방식을 쓸지(우리 선택), POST면 cross-site POST라 Lax 쿠키 미전송(이미 쿠키 미사용 설계, A-018) | 현재 GET만 구현, POST는 405. **GET 선택 시 그대로, POST 선택 시 핸들러 추가** |
+| 8 | return_url·state 보존 | return_url은 서버가 정함(≤250자) | 우리가 붙인 query(`state`)가 복귀 때 보존되는지 | **보존되지 않으면** 현재 callback(state hash로 거래 조회)이 동작하지 않는다 → `web_transaction_id`·`transaction_id`로 거래를 찾는 방식으로 바꿔야 함(A-050 구조 변경). sandbox가 없으므로 **NICE 담당자 서면 확인 필요** |
+| 9 | 결과 조회·기한 | `POST /ido/intc/v1.0/auth/result`, `web_transaction_id` + `request_no` + `transaction_id` 필요(N1) | 인증 완료 후 몇 분까지 요청 가능한지 | 거래 TTL 10분 안에서만 결과 요청. 기한이 더 짧으면 TTL 조정 |
+| 10 | 같은 결과 재조회 | — | 두 번 요청할 수 있는지 | 불가하면 아래 11과 함께 구조 변경 |
+| 11 | 동시 callback 중복 조회 | — | 동시 요청 허용·두 번째 요청 결과 | 현재 구조는 동시 callback에서 provider 결과 확인이 **여러 번** 일어날 수 있다(A-050 ⑤). 재조회 불가면 결과 요청 전에 "조회 중" 표시를 DB에 남기는 단계 추가 필요(상태 머신 변경 → 사용자 결정) |
+| 12 | 이름·전화 형식 | 항목 이름 `name`, `mobile_no`, `mobile_co`(N1) | 문자 인코딩, 길이, 전화번호 형식(하이픈·국가코드), 외국인 이름 | 현재 정규화: 이름 1~100자, 전화 `^01[0-9]{8,9}$`(A-050). 형식이 다르면 adapter에서 변환 규칙 확정 |
+| 13 | 결과 복호화 | PBKDF2(HMAC-SHA256, 512bit) 입력 `ticket`·`iterators`·`transaction_id`, 앞 32B 대칭키, 48번째부터 32B 무결성 키, AES-GCM 예제(N1) | 정확한 입력 결합 순서·인코딩, IV 위치, 무결성 검증 대상(암호문/평문)·알고리즘, 응답 필드 이름, 결과 요청 시 토큰 동일성 | 공식 예제 코드·테스트 벡터 없이는 구현하지 않는다. **복호화 테스트 벡터(입력·기대 출력) 필요** |
+
+**받아야 할 자료(외부):**
+1. NICE 이용 계약서와 DI 제공(필요하면 CI/DI 신청서) 확인서
+2. 이용기관용 통합인증 개발 가이드 최신판, 결과 복호화 예제 코드와 **테스트 벡터**
+3. `client_id`·`client_secret`(운영/스테이징 구분 여부 포함) — 등록할 Outbound IP를 먼저 제출
+4. 서면 답변: return_url query 보존 여부, 결과 요청 기한, 재조회·동시 조회 가능 여부, 토큰 동일성 요건, 토큰 재발급 규칙, request_no 문자 규칙, 오류 코드 목록
+5. 과금 시작일과 실인증 테스트 계획(지정 인원·횟수, Q-019)
+6. 호스팅 측: 고정 출구 IP 방법(Vercel Static IP 등)과 비용(Q-020)
+
+**구현 착수 조건:** 1·2·4의 #8, #10, #11, #13이 확인되기 전에는 실제 요청 코드를 작성하지 않는다.
+
 ---
 
 ## 3. 이전 보고(W1) 대비 정정 요약

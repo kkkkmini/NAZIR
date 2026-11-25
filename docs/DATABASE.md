@@ -571,7 +571,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 | `token_hash` | varchar(255) | UNIQUE, NOT NULL |
 | `browser_binding_hash` | varchar(255) | NOT NULL |
 | `status` | varchar(20) | `ACTIVE`, `REVOKED`, `EXPIRED` |
-| `expires_at` | timestamptz | NOT NULL — BOOKING: 발급 + **고정 30분**(sliding 없음) [확정 D-015, NICE 측 제약은 미확인 Q-001], LOOKUP: 권장 10분 |
+| `expires_at` | timestamptz | NOT NULL — BOOKING: 발급 + **고정 30분**(sliding 없음) [확정 D-015, NICE 측 제약은 미확인 Q-001], LOOKUP: **고정 10분**(sliding 없음) [확정 A-052] |
 | `last_used_at` | timestamptz | NULL 가능 |
 | `revoked_at` | timestamptz | NULL 가능 |
 | `created_at` / `updated_at` | timestamptz | NOT NULL |
@@ -586,7 +586,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 - claim 트랜잭션도 서비스 수준에서 같은 값을 검증한다(DB가 최종 방어)
 - 인덱스 `(identity_subject_id, status)`, `(browser_binding_hash, status)`
 - 부분 unique `(browser_binding_hash, purpose) WHERE status = 'ACTIVE'`(`identity_sessions_active_binding_uq`) [A-051, migration `20261127120000_identity_claim`] — 바인딩·purpose당 ACTIVE 세션 1개
-- 응답 유실 복구(A-051): 미사용 세션의 `token_hash`만 교체(같은 행, `expires_at` 불변)
+- 응답 유실 복구(A-051, A-052): 그 인증의 세션이 ACTIVE·미만료·`last_used_at IS NULL`이고 DB `now() < created_at + 5분`일 때 `token_hash`만 교체(같은 행, `expires_at` 불변, 인증 `CONSUMED` 유지). `claim_expires_at`과 무관
 
 규칙 [채택 A-009]:
 - 요청마다 쿠키 토큰 hash와 **바인딩 쿠키 hash가 모두 일치**해야 유효하다. 다른 브라우저로 복사된 세션 쿠키는 바인딩 불일치로 거부된다.

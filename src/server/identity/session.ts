@@ -17,11 +17,15 @@
  *   5. 200 { purpose, expiresAt, displayName } + Set-Cookie __Host-nz_idv (Max-Age = seconds to expires_at). The raw
  *      token exists only in that header.
  *
- * Response-loss recovery (A-051): if the claim committed but the browser never received the cookie, the same browser
- * may repeat the claim while ALL hold: verification CONSUMED, same binding, DB now() < claim_expires_at, its session is
- * ACTIVE, unexpired and has never been used (last_used_at IS NULL). The session row is kept (same id, same expires_at —
- * no extension) and only its token hash is replaced, so any copy of the lost token stops working. Outside these
- * conditions the user verifies again. No token is ever stored or returned for recovery.
+ * Response-loss recovery (A-051, A-052): if the claim committed but the browser never received the cookie, the same
+ * browser may repeat the claim of the SAME verification while ALL hold (each checked in SQL against DB now()):
+ *   - the verification is CONSUMED and its stored binding hash equals this browser's
+ *   - the session row belongs to THIS verification (identity_verification_id = id) and to this binding
+ *   - the session is ACTIVE, unexpired, never used (last_used_at IS NULL)
+ *   - now() < session.created_at + RECOVERY_WINDOW_MS (5 minutes from the first successful claim's transaction;
+ *     NOT the verification's claim_expires_at)
+ * The row is kept (same id, same expires_at — no extension), the verification stays CONSUMED, and only token_hash is
+ * replaced, so any copy of the lost token stops working at once. No token is ever stored or returned for recovery.
  *
  * GET /api/v1/identity-session  — both cookies must match an ACTIVE, unexpired (DB now()) session. Returns
  *   { purpose, expiresAt, displayName }. Updates last_used_at only (never expires_at: no sliding, D-015).
@@ -48,8 +52,10 @@ import { AppError, toErrorResponse } from "../lib/errors";
 import type { Keyring, SecurityConfig } from "../lib/secrets";
 import { MINUTE_MS, POLICY } from "../lib/clock";
 
-/** D-015 (확정): BOOKING = fixed 30 minutes. LOOKUP = 10 minutes (DATABASE §6.3 권장값, not confirmed). */
+/** D-015 (확정): BOOKING fixed 30 minutes. A-052 (확정): LOOKUP fixed 10 minutes. No sliding for either. */
 export const SESSION_TTL_MS = { BOOKING: POLICY.bookingSessionMs, LOOKUP: 10 * MINUTE_MS } as const;
+/** A-052: a lost claim response can be recovered for 5 minutes after the first claim (session created_at, DB time). */
+export const RECOVERY_WINDOW_MS = 5 * MINUTE_MS;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface SessionDeps {
@@ -180,14 +186,15 @@ export async function handleClaim(request: Request, params: { id: string }, deps
           return { purpose: v.purpose, expiresAtMs: Number(s[0].expiresAtMs), nowMs: Number(s[0].nowMs), name: v.verified_name };
         }
 
-        if (v.status === "CONSUMED" && v.claim_open) {
-          // response-loss recovery: rotate the token of the never-used session of this claim
+        if (v.status === "CONSUMED") {
+          // response-loss recovery: rotate the token of the never-used session of THIS claim (A-052)
           const s = await tx<{ expiresAtMs: unknown; nowMs: unknown }>(
             `UPDATE "identity_sessions" SET "token_hash" = $3, "updated_at" = now()
               WHERE "identity_verification_id" = $1::uuid AND "browser_binding_hash" = $2 AND "status" = 'ACTIVE'
                 AND "expires_at" > now() AND "last_used_at" IS NULL
+                AND now() < "created_at" + $4::int * interval '1 millisecond'
               RETURNING floor(extract(epoch FROM "expires_at") * 1000)::bigint AS "expiresAtMs", floor(extract(epoch FROM now()) * 1000)::bigint AS "nowMs"`,
-            [v.id, bindingHash, tokenHash],
+            [v.id, bindingHash, tokenHash, RECOVERY_WINDOW_MS],
           );
           if (s.length === 1) return { purpose: v.purpose, expiresAtMs: Number(s[0].expiresAtMs), nowMs: Number(s[0].nowMs), name: v.verified_name };
         }

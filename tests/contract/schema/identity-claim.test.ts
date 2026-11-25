@@ -10,7 +10,7 @@ import { dbConstraintOf } from "../../../src/server/db/errors";
 import { handleIdentityCallback } from "../../../src/server/identity/callback";
 import { handleMockComplete } from "../../../src/server/identity/mock-control";
 import { MockIdentityProvider } from "../../../src/server/identity/providers/mock";
-import { SESSION_TTL_MS, handleClaim, handleDeleteSession, handleGetSession, mapClaimDbError, maskName, type SessionDeps } from "../../../src/server/identity/session";
+import { RECOVERY_WINDOW_MS, SESSION_TTL_MS, handleClaim, handleDeleteSession, handleGetSession, mapClaimDbError, maskName, type SessionDeps } from "../../../src/server/identity/session";
 import { handleStartVerification } from "../../../src/server/identity/start";
 import { BINDING_COOKIE, IDENTITY_SESSION_COOKIE } from "../../../src/server/lib/cookies";
 import { sha256Hex } from "../../../src/server/lib/crypto/hmac";
@@ -227,10 +227,9 @@ describe("CLM claim", () => {
     expect(after[0].expires_at.getTime()).toBe(before.expires_at.getTime());
     expect((await getSession(b, lost.token)).status).toBe(401);
     expect((await getSession(b, retry.token)).status).toBe(200);
-    // ...but not from another browser, and not after the window
+    // ...but not from another browser
     expect((await claim(id, newBinding())).status).toBe(401);
-    await db.query(`UPDATE identity_verifications SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
-    expect((await claim(id, b)).status).toBe(422);
+    expect(await verification(id)).toBe("CONSUMED");
   });
 
   it("CLM-09 recovery is refused once the session was used, revoked or expired", async () => {
@@ -278,6 +277,131 @@ describe("CLM claim", () => {
     expect(look.body.purpose).toBe("LOOKUP");
     expect((await getSession(b, book.token)).status).toBe(200);
     expect((await getSession(b, look.token)).body.purpose).toBe("LOOKUP");
+  });
+});
+
+describe("REC claim response-loss recovery (A-052)", () => {
+  const sessionRow = async (id: string) =>
+    (await q<{ id: string; token_hash: string; expires_at: Date; status: string }>(`SELECT id, token_hash, expires_at, status FROM identity_sessions WHERE identity_verification_id = $1`, [id]))[0];
+  // move the session's creation (= first claim's transaction time) back by `ms`, keeping its 30-minute lifetime intact
+  const ageSession = (id: string, ms: number) =>
+    db.query(`UPDATE identity_sessions SET created_at = now() - $2::int * interval '1 millisecond' WHERE identity_verification_id = $1`, [id, ms]);
+
+  it("REC-01 window is 5 minutes from the first claim (session created_at, DB time): 4m59s ok, exactly 5m refused, 5m01s refused", async () => {
+    expect(RECOVERY_WINDOW_MS).toBe(5 * 60_000);
+    for (const [ageMs, ok] of [[RECOVERY_WINDOW_MS - 1000, true], [RECOVERY_WINDOW_MS, false], [RECOVERY_WINDOW_MS + 1000, false]] as const) {
+      const b = newBinding();
+      const id = await verified(b);
+      await claim(id, b);
+      await ageSession(id, ageMs);
+      expect((await claim(id, b)).status, `age ${ageMs}`).toBe(ok ? 200 : 422);
+    }
+  });
+
+  it("REC-02 independent of claim_expires_at: claim_expires_at already passed but within 5 min of the claim → recovered", async () => {
+    const b = newBinding();
+    const id = await verified(b);
+    await claim(id, b);
+    await db.query(`UPDATE identity_verifications SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
+    const r = await claim(id, b);
+    expect(r.status).toBe(200);
+    // and the reverse: claim window still open, recovery window passed → refused
+    const b2 = newBinding();
+    const id2 = await verified(b2);
+    await claim(id2, b2);
+    await ageSession(id2, RECOVERY_WINDOW_MS + 1000);
+    await db.query(`UPDATE identity_verifications SET claim_expires_at = now() + interval '1 minute' WHERE id = $1`, [id2]);
+    expect((await claim(id2, b2)).status).toBe(422);
+  });
+
+  it("REC-03 recovery keeps the row, the expiry and CONSUMED; only the token hash changes; the old token dies", async () => {
+    const b = newBinding();
+    const id = await verified(b);
+    const lost = await claim(id, b);
+    const before = await sessionRow(id);
+    const rec = await claim(id, b);
+    const after = await sessionRow(id);
+    expect([after.id, after.status, after.expires_at.getTime()]).toEqual([before.id, "ACTIVE", before.expires_at.getTime()]);
+    expect(after.token_hash).toBe(sha256Hex(rec.token!));
+    expect(after.token_hash).not.toBe(before.token_hash);
+    expect(await verification(id)).toBe("CONSUMED");
+    expect((await getSession(b, lost.token)).status).toBe(401);
+    expect(new Date(rec.body.expiresAt).getTime()).toBe(Math.floor(before.expires_at.getTime()));
+  });
+
+  it("REC-04 concurrent recoveries: exactly one token is live at the end, one session row, still CONSUMED", async () => {
+    const b = newBinding();
+    const id = await verified(b);
+    await claim(id, b);
+    const rs = await Promise.all(Array.from({ length: 10 }, () => claim(id, b)));
+    for (const r of rs) expect(r.status).toBe(200); // each rotation is serialized by the row lock
+    const row = await sessionRow(id);
+    expect(rs.filter((r) => sha256Hex(r.token!) === row.token_hash)).toHaveLength(1);
+    expect(await q(`SELECT id FROM identity_sessions WHERE identity_verification_id = $1`, [id])).toHaveLength(1);
+    expect(await verification(id)).toBe("CONSUMED");
+  });
+
+  it("REC-05 once the session has been used, no recovery", async () => {
+    const b = newBinding();
+    const id = await verified(b);
+    const c = await claim(id, b);
+    await getSession(b, c.token);
+    expect((await claim(id, b)).status).toBe(422);
+    expect((await getSession(b, c.token)).status).toBe(200); // the used token is untouched
+  });
+
+  it("REC-06 another verification id cannot recover someone's session: neither another browser's, nor this browser's older one", async () => {
+    // this browser: first claim (id1) then a second verification claimed (id2) → id1's session REVOKED
+    const b = newBinding();
+    const id1 = await verified(b);
+    await claim(id1, b);
+    const id2 = await verified(b);
+    const c2 = await claim(id2, b);
+    // id1 is CONSUMED with a REVOKED session → no recovery, and id2's session is not touched by it
+    expect((await claim(id1, b)).status).toBe(422);
+    expect((await sessionRow(id2)).token_hash).toBe(sha256Hex(c2.token!));
+    // another browser's CONSUMED verification → binding mismatch, nothing rotated
+    const other = newBinding();
+    const idOther = await verified(other);
+    const co = await claim(idOther, other);
+    expect((await claim(idOther, b)).status).toBe(401);
+    expect((await sessionRow(idOther)).token_hash).toBe(sha256Hex(co.token!));
+  });
+
+  it("REC-07 the session-ownership condition is enforced in SQL: a session of another verification is never rotated", async () => {
+    const b = newBinding();
+    const id = await verified(b);
+    const c = await claim(id, b);
+    // forge: a CONSUMED verification of the same browser that owns no session of its own (would fail A-040 at commit
+    // in real data; here only the recovery UPDATE's WHERE clause is exercised inside a rolled-back transaction)
+    const cl = await db.pool.connect();
+    try {
+      await cl.query("BEGIN");
+      const r = await cl.query(
+        `UPDATE identity_sessions SET token_hash = 'x' WHERE identity_verification_id = $1::uuid AND browser_binding_hash = $2 AND status = 'ACTIVE' AND expires_at > now() AND last_used_at IS NULL AND now() < created_at + interval '5 minutes' RETURNING id`,
+        ["00000000-0000-4000-8000-000000000999", sha256Hex(b)],
+      );
+      expect(r.rowCount).toBe(0);
+    } finally {
+      await cl.query("ROLLBACK");
+      cl.release();
+    }
+    expect((await sessionRow(id)).token_hash).toBe(sha256Hex(c.token!));
+  });
+});
+
+describe("LKP LOOKUP session lifetime (A-052)", () => {
+  it("LKP-01 LOOKUP is fixed 10 minutes (DB time), not extended by use; expired → 401", async () => {
+    expect(SESSION_TTL_MS.LOOKUP).toBe(10 * 60_000);
+    const b = newBinding();
+    const c = await claim(await verified(b, "success:A", "LOOKUP"), b);
+    const row = (await q<{ ms: string; e: Date }>(`SELECT extract(epoch FROM expires_at - created_at) * 1000 ms, expires_at e FROM identity_sessions WHERE token_hash = $1`, [sha256Hex(c.token!)]))[0];
+    expect(Number(row.ms)).toBe(10 * 60_000);
+    await getSession(b, c.token);
+    const after = (await q<{ e: Date }>(`SELECT expires_at e FROM identity_sessions WHERE token_hash = $1`, [sha256Hex(c.token!)]))[0];
+    expect(after.e.getTime()).toBe(row.e.getTime());
+    await db.query(`UPDATE identity_sessions SET created_at = now() - interval '10 minutes', expires_at = now() WHERE token_hash = $1`, [sha256Hex(c.token!)]);
+    expect((await getSession(b, c.token)).status).toBe(401); // expires_at == now() is expired
   });
 });
 
