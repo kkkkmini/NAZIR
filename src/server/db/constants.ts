@@ -129,6 +129,10 @@ export const DB_CONSTRAINT = {
   /** Deferred trigger errors (COMMIT, 23514): a session needs a CONSUMED verification / a CONSUMED verification needs its session. */
   sessionNeedsConsumedVerification: "identity_sessions_verification_consumed_ck",
   consumedVerificationNeedsSession: "identity_verifications_consumed_session_ck",
+  /** Partial unique (A-051): one ACTIVE identity session per browser binding and purpose. */
+  activeSessionPerBindingUnique: "identity_sessions_active_binding_uq",
+  /** UNIQUE: one session per verification. */
+  sessionPerVerificationUnique: "identity_sessions_verification_uq",
   /** CHECKs added by A-038 / A-039. */
   paymentSucceededApprovedAtCheck: "payments_succeeded_approved_at_ck",
   requestedMethodTypeCheck: "payments_requested_method_type_ck",

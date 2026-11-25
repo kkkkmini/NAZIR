@@ -6,10 +6,17 @@
 import { randomBytes } from "node:crypto";
 
 export const BINDING_COOKIE = "__Host-nz_bind";
+/** Identity session (BOOKING/LOOKUP), API_SPEC §3.1. Same fixed attributes as the binding cookie. */
+export const IDENTITY_SESSION_COOKIE = "__Host-nz_idv";
 /** 30 days, never extended (A-044). */
 export const BINDING_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 /** 256-bit random value, base64url without padding = 43 characters. */
 const BINDING_VALUE = /^[A-Za-z0-9_-]{43}$/;
+
+/** 256-bit random token, base64url (43 characters). Used for the binding value and the identity session token. */
+export function isValidToken(value: string | null | undefined): value is string {
+  return typeof value === "string" && BINDING_VALUE.test(value);
+}
 
 export function newBindingValue(random: (n: number) => Buffer = randomBytes): string {
   return random(32).toString("base64url");
@@ -36,4 +43,9 @@ export function readCookie(header: string | null, name: string): string | null {
 export function serializeHostCookie(name: string, value: string, maxAgeSeconds: number): string {
   if (!name.startsWith("__Host-")) throw new Error("audience cookies must use the __Host- prefix");
   return `${name}=${value}; Max-Age=${maxAgeSeconds}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+/** Deletes a cookie with exactly the attributes it was set with (so the browser matches and removes it). */
+export function serializeHostCookieDeletion(name: string): string {
+  return serializeHostCookie(name, "", 0);
 }

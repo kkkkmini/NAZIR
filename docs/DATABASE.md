@@ -529,7 +529,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 | `verified_name` | text | NULL 가능, 암호화 권장 |
 | `verified_phone` | text | NULL 가능, 암호화 권장 |
 | `verified_at` | timestamptz | NULL 가능 |
-| `claim_expires_at` | timestamptz | NULL 가능, `VERIFIED` 후 세션 교환 허용 기한 [권장 5분] |
+| `claim_expires_at` | timestamptz | NULL 가능, `VERIFIED` 후 세션 교환 허용 기한 = `verified_at` + **5분** [확정 A-051], DB `now() <` 이 값일 때만 claim |
 | `expires_at` | timestamptz | NOT NULL, 인증 시도 자체의 만료 |
 | `failure_code` | varchar(100) | NULL 가능 |
 | `created_at` / `updated_at` | timestamptz | NOT NULL |
@@ -585,6 +585,8 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 - `UNIQUE (id, identity_subject_id)` — 주문 복합 FK 대상
 - claim 트랜잭션도 서비스 수준에서 같은 값을 검증한다(DB가 최종 방어)
 - 인덱스 `(identity_subject_id, status)`, `(browser_binding_hash, status)`
+- 부분 unique `(browser_binding_hash, purpose) WHERE status = 'ACTIVE'`(`identity_sessions_active_binding_uq`) [A-051, migration `20261127120000_identity_claim`] — 바인딩·purpose당 ACTIVE 세션 1개
+- 응답 유실 복구(A-051): 미사용 세션의 `token_hash`만 교체(같은 행, `expires_at` 불변)
 
 규칙 [채택 A-009]:
 - 요청마다 쿠키 토큰 hash와 **바인딩 쿠키 hash가 모두 일치**해야 유효하다. 다른 브라우저로 복사된 세션 쿠키는 바인딩 불일치로 거부된다.
@@ -1593,6 +1595,7 @@ npm run test:db
 - 쓰기 경로(Step 5 이후)는 반드시 raw query + 명시적 READ COMMITTED + §13.2 잠금 순서를 따르고, `updated_at`을 직접 갱신한다. 제약 이름은 `DB_CONSTRAINT`로 도메인 오류에 매핑하되 Prisma 오류의 `meta.driverAdapterError.cause`를 기준으로 한다(S7).
 - Step 3 착수 전 사용자 결정 필요: 없음(D1~D8 확정). Step 5 전: Q-025 세부 형식.
 - **Step 3 구현(2026-11-22):** 공개 조회는 `src/server/catalog/public-catalog.ts`(읽기 전용, 쓰기·잠금·hold 정리 없음). 좌석은 §11.1(`seat-display.ts`), 회차는 §11.11(`sales-status.ts`)로 한 번 읽은 DB 시각 하나로 계산한다. hold 만료는 주문 `hold_expires_at`을 epoch 밀리초로 읽어 비교한다.
+- **2026-11-27 추가 실측(A-051):** constraint trigger가 COMMIT에서 올린 오류는 `DriverAdapterError.cause`에 `originalCode`(예 `23514`)만 있고 **`constraint`가 없다**(adapter-pg 7.10.1, `TABLE`/`CONSTRAINT`를 지정한 RAISE도 동일). 매핑은 SQLSTATE와 트랜잭션 문맥으로 하고 메시지를 파싱하지 않는다. 문장 시점 unique 오류에는 이름이 있다. 구현 `src/server/db/errors.ts`.
 - **Step 5 오류 매핑(S7) 참고 — 2026-11-22 실측:** interactive `$transaction`의 **COMMIT 시점** 제약 오류(지연 제약·지연 constraint trigger)는 `PrismaClientKnownRequestError`로 감싸지지 않고 **`DriverAdapterError`가 그대로** 나온다. SQLSTATE는 `error.cause.originalCode`, 제약 이름은 `error.cause.constraint`에 있다. 문장 시점 오류는 `error.meta.driverAdapterError.cause`에 있다. 두 형태를 모두 처리해야 한다(`scripts/verify-db-session.ts` 4번).
 
 ### 19.12 Step 3: 앱 DB 연결의 세션 시간대 고정 (S11, 2026-11-20)

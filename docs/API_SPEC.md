@@ -211,6 +211,10 @@
 - 응답: `{ "purpose": "BOOKING", "expiresAt": "…", "displayName": "홍*동" }`.
 - 실패: 다른 브라우저(바인딩 불일치) 401, 재사용(`CONSUMED`) 422 `IDENTITY_VERIFICATION_FAILED`.
 
+**구현(Step 4, 2026-11-27, A-051)** — `src/server/identity/session.ts`. 본문 없음 또는 `{}`(다른 필드 400). 순서: id 형식 400 → 바인딩 401 `BROWSER_BINDING_REQUIRED` → CSRF 403 → (트랜잭션) 없음 404 `NOT_FOUND` → 바인딩 불일치 401 `BROWSER_BINDING_MISMATCH` → `VERIFIED`가 아니거나 창 경과 422 `IDENTITY_VERIFICATION_FAILED`. 성공 200 + `Set-Cookie: __Host-nz_idv=…; Max-Age=<남은 초>; Path=/; Secure; HttpOnly; SameSite=Lax`, `no-store`. `displayName`은 첫·끝 글자만 남긴 마스킹(파기된 경우 null). 같은 브라우저의 응답 유실 재시도는 미사용 세션의 토큰만 교체(A-051 ③).
+- `GET /identity-session` → 200 `{ purpose, expiresAt, displayName }` / 401 `IDENTITY_SESSION_REQUIRED`(없음·만료·폐기·형식 오류) / 401 `BROWSER_BINDING_MISMATCH`(다른 브라우저로 복사된 토큰). `last_used_at`만 갱신.
+- `DELETE /identity-session` (CSRF) → 204 + 세션 쿠키 삭제(같은 속성, `Max-Age=0`), 반복 호출도 204. 두 쿠키가 모두 맞는 세션만 폐기.
+
 ### 4.3 공연·회차·좌석 조회
 
 - 공개 API. `GET /sessions/{id}/seats`는 DATABASE §11.1 우선순위로 `AVAILABLE`/`HELD`/`SOLD`/`BLOCKED`를 계산한다. 개별 점유 주체 정보는 노출하지 않는다.

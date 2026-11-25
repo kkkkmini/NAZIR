@@ -114,6 +114,13 @@ export const PARTIAL_UNIQUES: PartialUnique[] = [
     rule: "A-049: one PENDING start per browser binding and purpose",
   },
   {
+    name: "identity_sessions_active_binding_uq",
+    table: "identity_sessions",
+    columns: ["browser_binding_hash", "purpose"],
+    predicate: { column: "status", op: "in", values: ["ACTIVE"] },
+    rule: "A-051: one ACTIVE identity session per browser binding and purpose",
+  },
+  {
     name: "review_cases_open_dedupe_uq",
     table: "review_cases",
     columns: ["case_type", "dedupe_key"],

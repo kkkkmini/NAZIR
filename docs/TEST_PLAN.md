@@ -539,6 +539,39 @@ Unit `tests/unit/identity-provider.test.ts`(IDP-U01~05), DB·API `tests/contract
 
 **결과(2026-11-26):** unit 390 passed, DB 483 passed. 실제 Chromium(`next start`, test 환경, 새 DB): bootstrap → 시작 200 → Mock 화면 → 인물 A → 303 연쇄 → `/identity/complete?vid=`(state·토큰 없음), DB `VERIFIED`·암호화·context 삭제, 사용한 거래의 Mock 화면은 not-found, 타 Origin 제어 403, 서버 로그에 state·토큰·이름 없음.
 
+### 6.6 Claim·인증 세션 (Step 4, A-051)
+
+DB `tests/contract/schema/identity-claim.test.ts`(**앱 Prisma 클라이언트의 실제 interactive 트랜잭션**, 인증은 실제 시작→Mock→callback으로 생성), Unit `tests/unit/db-errors.test.ts`.
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| CLM-01 | 같은 브라우저 claim | 200, CONSUMED, ACTIVE 세션 1개, 30분 고정, 쿠키 속성, 토큰은 쿠키에만(DB는 hash) |
+| CLM-02 | 다른 브라우저 | 401 `BROWSER_BINDING_MISMATCH`, 변경 없음 |
+| CLM-03 | VERIFIED 아님(취소·실패·EXPIRED) | 422 |
+| CLM-04 | 미지 id 404, 형식·본문 필드 400 | |
+| CLM-05 | 창: 5분 확인, 경계(`= now()`) 거부, 경과 거부, 직전 성공 | |
+| CLM-06 | CSRF·Origin·바인딩 누락 | 거부, 변경 없음 |
+| CLM-07 | 사용된 세션의 재 claim 422, 재인증 시 이전 세션 REVOKED(IDV-15) | |
+| CLM-08 | 응답 유실 후 재 claim | 같은 세션 행, 새 토큰, 이전 토큰 무효, 만료 불변; 다른 브라우저·창 경과 거부 |
+| CLM-09 | 사용·폐기·만료된 세션은 복구 불가 | 422 |
+| CLM-10 | 같은 claim 15회 동시 | 세션 1개, 유효 토큰 1개, 스스로 폐기 없음 |
+| CLM-11 | 같은 브라우저의 다른 인증 2건 동시 claim | ACTIVE 1개, 제약 오류 비노출 |
+| CLM-12 | BOOKING·LOOKUP 분리 | |
+| M7-01 | COMMIT 시점 23514 | `DriverAdapterError`, SQLSTATE만(이름 없음) 실측, 매핑; 문장 시점 23505 이름 포함 |
+| M7-02 | claim 트랜잭션이 COMMIT에서 실패 | 422, 인증 VERIFIED 유지, 새 세션 없음, 기존 세션 폐기 안 됨 |
+| M7-03 | 무관한 오류 | 500, 내부 메시지 비노출 |
+| SES-01 | 조회 | 3개 필드만, 마스킹, no-store, `expires_at` 불변 |
+| SES-02 | 만료·폐기·형식 오류·쿠키 없음 | 401 |
+| SES-03 | 다른 브라우저로 복사된 토큰 | 401 `BROWSER_BINDING_MISMATCH` |
+| SES-04 | 로그아웃·이후 토큰 거부·반복 로그아웃 | 204, 같은 속성으로 쿠키 삭제 |
+| SES-05 | 다른 사용자 세션 영향 없음 | |
+| SES-06 | CSRF 없는 로그아웃 | 403, 폐기·쿠키 삭제 없음 |
+| SES-07 | DB: 바인딩·purpose당 ACTIVE 1개 | 23505 |
+| SES-08 | 로그 | 토큰·바인딩·이름·전화 없음 |
+| M7-U01 | 오류 형태 3종, 메시지 미사용, 이름 마스킹 | |
+
+**결과(2026-11-27):** unit 396 passed, DB 506 passed. 실제 Chromium(`next start`, test 환경): bootstrap → 시작 → Mock(인물 B) → callback → claim 200(`__Host-nz_idv` HttpOnly·Secure·Lax·30분, JS 비노출) → 세션 조회 200 → 사용 후 재 claim 422 → 로그아웃 204(쿠키 삭제) → 조회 401.
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |
