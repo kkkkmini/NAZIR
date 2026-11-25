@@ -481,6 +481,34 @@ Unit `tests/unit/pii-crypto.test.ts`, DB `tests/contract/schema/pii-subjects.tes
 
 **결과(2026-11-25):** unit 375 passed(PII 22 포함), DB 426 passed(SUBJ·ERASE 17 포함, DRIFT-01 포함).
 
+### 6.4 IdentityProvider·인증 시작 (Step 4, A-049)
+
+Unit `tests/unit/identity-provider.test.ts`(IDP-U01~05), DB·API `tests/contract/schema/identity-start.test.ts`(START-01~20, 실제 PostgreSQL·실제 rate limiter·CSRF·Mock).
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| IDP-U01 | Mock local·test | 시작 성공, 같은 출처 launch, 신원 입력 없음, 주입 난수로 결정적 |
+| IDP-U02·03 | Mock staging·production·잘못된 값 | factory와 클래스 모두 거부, 시작 검사도 거부(PRV-01/02) |
+| IDP-U04 | 잘못된 provider 설정 | 거부 |
+| IDP-U05 | NICE adapter | 항상 `ProviderUnavailableError` |
+| START-01·02 | 정상(BOOKING·LOOKUP) | 200, PENDING, 바인딩 hash, state hash만 저장, context 암호화, TTL 10분(DB 시각), no-store |
+| START-03 | 요청 형식(필드 누락·미지 purpose·returnUrl 포함·배열·비JSON·content-type·과대) | 400, 기록·카운터 없음 |
+| START-04 | 바인딩 누락·변조 | 401 `BROWSER_BINDING_REQUIRED`, 카운터 없음 |
+| START-05 | CSRF 토큰 누락·다른 브라우저·변조, Origin 누락·타 사이트·null | 403, 카운터 없음 |
+| START-06 | 같은 브라우저 6번째 | 429 + Retry-After, 이전 시작은 SUPERSEDED |
+| START-07 | IP 60회 초과 | 429, 새 브라우저 카운터 미생성(IP 먼저) |
+| START-08·09 | rate limit 저장소 장애, 신뢰 IP 헤더 없음 | 503 `RATE_LIMIT_UNAVAILABLE`, 행 없음 |
+| START-10·11·12 | provider 장애·거부·잘못된 응답(외부 URL·javascript:·잘못된 id)·예상 밖 예외 | 503 / 502, 행 FAILED, 로그·응답 비노출 |
+| START-13 | Mock을 production으로 생성 | 503, 행 없음 |
+| START-14·15 | 중복·동시 요청 | 409 `REQUEST_IN_PROGRESS`, provider 1회, PENDING 1건 |
+| START-16 | DB 방어 | 두 번째 PENDING·같은 state hash 거부 |
+| START-17 | state | 매번 새 값, 고정 난수면 두 번째 실패(재사용 없음) |
+| START-18 | 만료 후 provider 응답 | 저장 안 함, 409 |
+| START-19 | 응답 없는 오래된 PENDING | 새 시작이 대체 |
+| START-20 | 로그 | 바인딩·키·IP 없음 |
+
+**결과(2026-11-26):** unit 390 passed, DB 459 passed.
+
 ## 7. P0 결제/티켓 [확정 D-003, D-005]
 
 | ID | 시나리오 | 기대 결과 |

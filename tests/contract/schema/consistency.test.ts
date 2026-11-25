@@ -503,7 +503,7 @@ describe("Q-024 — an identity session carries its verification's subject and p
       purpose,
       provider: "MOCK",
       browser_binding_hash: "b",
-      state_nonce_hash: "n",
+      state_nonce_hash: `n-${Math.random().toString(36).slice(2)}`, // A-049: state is unique
       status,
       identity_subject_id: subjectId,
       expires_at: new Date(Date.now() + 600_000),

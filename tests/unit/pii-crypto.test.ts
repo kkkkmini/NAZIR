@@ -109,6 +109,7 @@ describe("PII-U07/08 four separate keyrings, fail-closed", () => {
     NAZIR_RATE_LIMIT_KEYS: `v1:${k()}`, NAZIR_RATE_LIMIT_KEY_CURRENT: "v1",
     NAZIR_SUBJECT_HMAC_KEYS: `v1:${k()}`, NAZIR_SUBJECT_HMAC_KEY_CURRENT: "v1",
     NAZIR_PII_ENC_KEYS: `v1:${k()}`, NAZIR_PII_ENC_KEY_CURRENT: "v1",
+    NAZIR_PROVIDER_CTX_ENC_KEYS: `v1:${k()}`, NAZIR_PROVIDER_CTX_ENC_KEY_CURRENT: "v1", // A-049
   });
   const violations = (env: Record<string, string>, rt: string) => {
     try {
@@ -121,16 +122,16 @@ describe("PII-U07/08 four separate keyrings, fail-closed", () => {
   };
   it("PII-U07 every pair of keyrings sharing key material is refused (any environment)", () => {
     expect(violations(four(), "production")).toEqual([]);
-    const names = ["NAZIR_CSRF", "NAZIR_RATE_LIMIT", "NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC"];
-    for (let i = 0; i < 4; i++)
-      for (let j = i + 1; j < 4; j++) {
+    const names = ["NAZIR_CSRF", "NAZIR_RATE_LIMIT", "NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC", "NAZIR_PROVIDER_CTX_ENC"];
+    for (let i = 0; i < names.length; i++)
+      for (let j = i + 1; j < names.length; j++) {
         const env = four();
         env[`${names[j]}_KEYS` as keyof typeof env] = env[`${names[i]}_KEYS` as keyof typeof env];
         expect(violations(env, "local"), `${names[i]} vs ${names[j]}`).toEqual([`${names[i]} and ${names[j]} must not share a key`]);
       }
   });
   it("PII-U08 missing subject/PII keys refuse startup in staging/production; local starts but loading fails; PII keys must be 32 bytes", () => {
-    for (const p of ["NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC"]) {
+    for (const p of ["NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC", "NAZIR_PROVIDER_CTX_ENC"]) {
       const env: Record<string, string> = { ...four(), [`${p}_KEYS`]: "", [`${p}_KEY_CURRENT`]: "" };
       expect(violations(env, "production")).toEqual([`${p}_KEYS and ${p}_KEY_CURRENT are required in production`]);
       expect(violations(env, "staging")).toHaveLength(1);

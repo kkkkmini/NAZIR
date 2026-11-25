@@ -617,8 +617,8 @@ describe("identity, idempotency, webhook and review-case uniqueness", () => {
 
       const v = (txn: string | null) =>
         insert(c, "identity_verifications", {
-          purpose: "BOOKING", provider: "NICE", provider_transaction_id: txn, browser_binding_hash: "b",
-          state_nonce_hash: "n", status: "PENDING", expires_at: new Date(Date.now() + 60_000),
+          purpose: "BOOKING", provider: "NICE", provider_transaction_id: txn, browser_binding_hash: `b-${Math.random()}`,
+          state_nonce_hash: `n-${Math.random()}`, status: "PENDING", expires_at: new Date(Date.now() + 60_000),
         });
       await v("txn-1");
       await expectInsertError(c, () => v("txn-1"), { code: PG.uniqueViolation, constraint: "identity_verifications_provider_txn_uq" });
@@ -627,7 +627,7 @@ describe("identity, idempotency, webhook and review-case uniqueness", () => {
       await expectInsertError(
         c,
         () => insert(c, "identity_verifications", {
-          purpose: "BOOKING", provider: "NICE", browser_binding_hash: "b", state_nonce_hash: "n", status: "VERIFIED",
+          purpose: "BOOKING", provider: "NICE", browser_binding_hash: "b", state_nonce_hash: `n-${Math.random()}`, status: "VERIFIED",
           expires_at: new Date(Date.now() + 60_000),
         }),
         { code: PG.checkViolation, constraint: "identity_verifications_verified_subject_ck" },

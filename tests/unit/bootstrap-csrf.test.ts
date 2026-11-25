@@ -211,6 +211,7 @@ describe("Security configuration (fail-closed)", () => {
       NAZIR_RATE_LIMIT_KEYS: `v1:${k()}`, NAZIR_RATE_LIMIT_KEY_CURRENT: "v1",
       NAZIR_SUBJECT_HMAC_KEYS: `v1:${k()}`, NAZIR_SUBJECT_HMAC_KEY_CURRENT: "v1",
       NAZIR_PII_ENC_KEYS: `v1:${k()}`, NAZIR_PII_ENC_KEY_CURRENT: "v1",
+      NAZIR_PROVIDER_CTX_ENC_KEYS: `v1:${k()}`, NAZIR_PROVIDER_CTX_ENC_KEY_CURRENT: "v1",
     };
     for (const envName of ["production", "staging"]) {
       expect(violations(() => assertStartupSecurityConfig({}, envName)).length).toBeGreaterThan(0);

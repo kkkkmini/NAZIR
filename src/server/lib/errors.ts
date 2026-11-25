@@ -7,6 +7,8 @@ export const ERROR_STATUS = {
   IDEMPOTENCY_KEY_INVALID: 400,
   IDENTITY_SESSION_REQUIRED: 401,
   BROWSER_BINDING_MISMATCH: 401,
+  /** No valid browser binding cookie: call GET /bootstrap first (A-049). */
+  BROWSER_BINDING_REQUIRED: 401,
   CSRF_REJECTED: 403,
   SESSION_PURPOSE_MISMATCH: 403,
   ORDER_ACCESS_DENIED: 403,
@@ -28,6 +30,8 @@ export const ERROR_STATUS = {
   ORDER_CREATION_LIMITED: 429,
   RATE_LIMITED: 429,
   INTERNAL_ERROR: 500,
+  /** The identity provider answered but refused / returned an unusable start response (A-049). */
+  IDENTITY_START_FAILED: 502,
   PROVIDER_UNAVAILABLE: 503,
   /** Rate limit store unavailable: fail-closed, distinct from the user's own RATE_LIMITED (A-045). */
   RATE_LIMIT_UNAVAILABLE: 503,

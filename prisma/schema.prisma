@@ -185,6 +185,8 @@ model IdentityVerification {
   sessions        IdentitySession[]
 
   @@unique([provider, providerTransactionId], map: "identity_verifications_provider_txn_uq")
+  @@unique([stateNonceHash], map: "identity_verifications_state_nonce_uq") // A-049
+  // partial unique identity_verifications_pending_binding_uq (one PENDING per binding+purpose) lives in raw SQL
   // target of the identity_sessions claim FK: (verification, subject, purpose, browser binding) must all match (A-040)
   @@unique([id, identitySubjectId, purpose, browserBindingHash], map: "identity_verifications_id_subject_purpose_binding_uq")
   @@index([browserBindingHash, createdAt], map: "identity_verifications_binding_created_idx")

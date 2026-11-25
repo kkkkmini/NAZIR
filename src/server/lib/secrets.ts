@@ -154,26 +154,43 @@ export function loadSecurityConfig(env: Env, runtimeEnv: string): SecurityConfig
  * Every keyring the server uses (A-043, A-044, A-045). Each has its own variables, and no key material may appear in
  * two of them (checked at startup, every environment).
  */
-export const KEYRING_PREFIXES = ["NAZIR_CSRF", "NAZIR_RATE_LIMIT", "NAZIR_SUBJECT_HMAC", "NAZIR_PII_ENC"] as const;
+export const KEYRING_PREFIXES = [
+  "NAZIR_CSRF",
+  "NAZIR_RATE_LIMIT",
+  "NAZIR_SUBJECT_HMAC",
+  "NAZIR_PII_ENC",
+  // Provider transaction context (DATABASE §6.2, A-028: "개인정보 암호화 키와 분리"), A-049
+  "NAZIR_PROVIDER_CTX_ENC",
+] as const;
+/** Keyrings used as AES-256 keys (exactly 32 bytes). */
+const AES_KEYRINGS: readonly string[] = ["NAZIR_PII_ENC", "NAZIR_PROVIDER_CTX_ENC"];
 /** AES-256 needs exactly 32 bytes. */
 export const PII_KEY_BYTES = 32;
 
-export function parsePiiKeyring(env: Env, violations: string[]): Keyring | null {
-  const ring = parseKeyring(env, "NAZIR_PII_ENC", violations);
+export function parseAesKeyring(env: Env, prefix: string, violations: string[]): Keyring | null {
+  const ring = parseKeyring(env, prefix, violations);
   if (!ring) return null;
   for (const [v, k] of ring.keys) {
     if (k.length !== PII_KEY_BYTES) {
-      violations.push(`NAZIR_PII_ENC_KEYS: key ${v} must be exactly ${PII_KEY_BYTES} bytes (AES-256)`);
+      violations.push(`${prefix}_KEYS: key ${v} must be exactly ${PII_KEY_BYTES} bytes (AES-256)`);
       return null;
     }
   }
   return ring;
 }
 
+export function parsePiiKeyring(env: Env, violations: string[]): Keyring | null {
+  return parseAesKeyring(env, "NAZIR_PII_ENC", violations);
+}
+
+function parseAny(env: Env, prefix: string, violations: string[]): Keyring | null {
+  return AES_KEYRINGS.includes(prefix) ? parseAesKeyring(env, prefix, violations) : parseKeyring(env, prefix, violations);
+}
+
 /** Loads one required keyring for use. Missing or malformed → SecretConfigError (callers fail closed). */
 export function loadKeyring(env: Env, prefix: (typeof KEYRING_PREFIXES)[number]): Keyring {
   const v: string[] = [];
-  const ring = prefix === "NAZIR_PII_ENC" ? parsePiiKeyring(env, v) : parseKeyring(env, prefix, v);
+  const ring = parseAny(env, prefix, v);
   if (!ring && v.length === 0) v.push(`${prefix}_KEYS and ${prefix}_KEY_CURRENT are required`);
   if (v.length > 0) throw new SecretConfigError(v);
   return ring!;
@@ -186,7 +203,7 @@ export function assertStartupSecurityConfig(env: Env, runtimeEnv: string): void 
   parseAppOrigin(env, runtimeEnv, violations);
   const rings: Keyring[] = [];
   for (const prefix of KEYRING_PREFIXES) {
-    const ring = prefix === "NAZIR_PII_ENC" ? parsePiiKeyring(env, violations) : parseKeyring(env, prefix, violations);
+    const ring = parseAny(env, prefix, violations);
     if (ring) rings.push(ring);
     else if (strict && !env[`${prefix}_KEYS`]?.trim() && !env[`${prefix}_KEY_CURRENT`]?.trim())
       violations.push(`${prefix}_KEYS and ${prefix}_KEY_CURRENT are required in ${runtimeEnv}`);

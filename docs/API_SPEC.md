@@ -50,6 +50,7 @@
 | `IDEMPOTENCY_KEY_INVALID` | 400 | 키 누락·형식 위반 |
 | `IDENTITY_SESSION_REQUIRED` | 401 | 인증 세션 없음·만료 |
 | `BROWSER_BINDING_MISMATCH` | 401 | 세션과 브라우저 바인딩 불일치 |
+| `BROWSER_BINDING_REQUIRED` | 401 | 바인딩 쿠키 없음·형식 오류(`GET /bootstrap` 먼저) [A-049] |
 | `CSRF_REJECTED` | 403 | Origin/CSRF 토큰 검증 실패 |
 | `SESSION_PURPOSE_MISMATCH` | 403 | LOOKUP 세션으로 예매 시도 등 |
 | `ORDER_ACCESS_DENIED` | 403/404 | 다른 주체의 주문 |
@@ -70,6 +71,7 @@
 | `PAYMENT_METHOD_UNAVAILABLE` | 422 | 현재 활성화되지 않은 결제수단·카드사(심사 미완료 등) [확정 D-012] |
 | `RATE_LIMITED` | 429 | 요청 제한. `details.retryAt`(ISO, DB 시각), `details.retryAfterSeconds` |
 | `RATE_LIMIT_UNAVAILABLE` | 503 | rate limit 저장소·설정 사용 불가(fail-closed, A-045). 사용자의 한도 초과와 구분 |
+| `IDENTITY_START_FAILED` | 502 | 인증사가 시작 요청을 거부하거나 쓸 수 없는 응답 [A-049] |
 | `PROVIDER_UNAVAILABLE` | 503 | PG/인증사 장애 |
 
 목록 응답: `{ "items": [], "pagination": { "page": 1, "limit": 20, "total": 0 } }`.
@@ -175,6 +177,12 @@
 ```
 
 응답: `{ "verificationId": "uuid", "launch": { … } }` — `launch`는 인증창을 여는 데 필요한 값(NICE: 인증 URL). 서버는 바인딩 hash와 단일 사용 nonce를 기록한다. Rate limit 대상(IP·바인딩).
+
+**구현(Step 4, 2026-11-26, A-049)** — `src/server/identity/start.ts`, provider `src/server/identity/providers/`. 헤더: `Cookie: __Host-nz_bind`, `Origin`, `X-CSRF-Token`, `Content-Type: application/json`. 본문은 정확히 `{ "purpose": "BOOKING" | "LOOKUP" }`(다른 필드 400).
+- 200 `{ verificationId, purpose, expiresAt, launch: { type: "redirect", url } }`, 항상 `Cache-Control: no-store`. state는 응답에 포함하지 않는다.
+- 오류: 400 `VALIDATION_FAILED` → 401 `BROWSER_BINDING_REQUIRED` → 403 `CSRF_REJECTED` → 429 `RATE_LIMITED`(+`Retry-After`, IP 먼저) / 503 `RATE_LIMIT_UNAVAILABLE` → 409 `REQUEST_IN_PROGRESS` → 503 `PROVIDER_UNAVAILABLE` / 502 `IDENTITY_START_FAILED`.
+- MOCK의 `launch.url`은 같은 출처 `/identity/mock?txn=…`(페이지는 callback 단계에서 구현, 현재 없음). NICE는 실제 호출 미구현이라 503.
+- **미확정(NICE):** `request_no` 생성 규칙, `return_url` query(state) 보존 여부, `method_type`(GET/POST) 선택, 결과 요청 계약 — PROVIDERS §2.2.
 
 서버 처리(NICE 통합인증, 원문 PROVIDERS §2.2): adapter가 공유 토큰 캐시의 접근토큰(24시간 유효)으로 `POST /ido/intc/v1.0/auth/url`을 호출한다(`request_no` 20~50자, `return_url` = 서버 결정 콜백 URL, `svc_types: ["M"]`). 응답의 `transaction_id`·인증 URL은 10분 유효하며, `request_no`·`transaction_id`·토큰 참조 ID만 `provider_context_encrypted`에 저장한다(DATABASE §6.2).
 

@@ -107,6 +107,13 @@ export const PARTIAL_UNIQUES: PartialUnique[] = [
     rule: "7: one valid ticket per seat (H1)",
   },
   {
+    name: "identity_verifications_pending_binding_uq",
+    table: "identity_verifications",
+    columns: ["browser_binding_hash", "purpose"],
+    predicate: { column: "status", op: "in", values: ["PENDING"] },
+    rule: "A-049: one PENDING start per browser binding and purpose",
+  },
+  {
     name: "review_cases_open_dedupe_uq",
     table: "review_cases",
     columns: ["case_type", "dedupe_key"],
@@ -126,6 +133,7 @@ export interface UniqueSpec {
 
 /** Non-partial unique indexes that carry an integrity rule (DATABASE.md §13.3, §14). */
 export const UNIQUES: UniqueSpec[] = [
+  { name: "identity_verifications_state_nonce_uq", table: "identity_verifications", columns: ["state_nonce_hash"] }, // A-049
   { name: "seats_venue_section_row_number_nnd_uq", table: "seats", columns: ["venue_id", "section_name", "row_label", "seat_number"], nullsNotDistinct: true },
   { name: "seats_venue_svg_seat_uq", table: "seats", columns: ["venue_id", "svg_seat_id"] },
   { name: "shows_slug_uq", table: "shows", columns: ["slug"] },

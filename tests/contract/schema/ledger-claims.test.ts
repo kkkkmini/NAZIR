@@ -312,8 +312,8 @@ describe("A-040 — a session needs a CONSUMED verification of the same subject,
     insert(c, "identity_verifications", {
       purpose: "BOOKING",
       provider: "MOCK",
-      browser_binding_hash: "bindA",
-      state_nonce_hash: "n",
+      browser_binding_hash: `bindA-${randomUUID()}`, // A-049: one PENDING per binding+purpose
+      state_nonce_hash: `n-${randomUUID()}`, // A-049: state is unique
       status,
       identity_subject_id: subjectId,
       expires_at: new Date(Date.now() + 600_000),
@@ -385,13 +385,13 @@ describe("A-040 — a session needs a CONSUMED verification of the same subject,
       await expectCommitError(
         c,
         async () => {
-          const v2 = await verification(c, u.id, "CONSUMED"); // the new target is fine (CONSUMED and about to own the session)
+          const v2 = await verification(c, u.id, "CONSUMED", { browser_binding_hash: v.browser_binding_hash }); // the new target is fine (CONSUMED and about to own the session)
           await c.query(`UPDATE identity_sessions SET identity_verification_id = $2 WHERE id = $1`, [s.id, v2.id]);
         },
         noSession, // ... but the OLD verification is left CONSUMED without a session
       );
       // moving it onto a verification that is not CONSUMED is refused for the opposite reason
-      const v3 = await verification(c, u.id, "VERIFIED");
+      const v3 = await verification(c, u.id, "VERIFIED", { browser_binding_hash: v.browser_binding_hash });
       await expectCommitError(c, () => c.query(`UPDATE identity_sessions SET identity_verification_id = $2 WHERE id = $1`, [s.id, v3.id]), noConsumed);
     }));
 
