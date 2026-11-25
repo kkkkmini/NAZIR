@@ -1,6 +1,6 @@
 /**
- * Rate limit policies (A-045, A-047). Identity-start numbers are CONFIRMED (A-047, 2026-11-25); order numbers are still
- * drafts (Q-013 / D-015 "권장"). Every value can be overridden by NAZIR_RATE_LIMIT_POLICIES without a code change, e.g.
+ * Rate limit policies (A-045, A-047). Identity-start numbers are CONFIRMED (A-047, 2026-11-25); order-creation numbers are
+ * CONFIRMED too (A-053 ④, 2026-11-25; an exact idempotent replay must not consume a hit — enforced by the order API). Every value can be overridden by NAZIR_RATE_LIMIT_POLICIES without a code change, e.g.
  *   NAZIR_RATE_LIMIT_POLICIES="identity.start.ip=10/600,identity.start.binding=5/600"
  * (`<policy>=<limit>/<window seconds>`). A registered policy with no draft and no configured value cannot be used:
  * `resolvePolicy` throws, and callers fail closed.
@@ -19,9 +19,9 @@ export const POLICY_DRAFTS = {
   "identity.start.ip": { limit: 60, windowSec: 600 },
   /** CONFIRMED A-047: identity start per browser binding, 5 per 10 minutes. A secondary defence only (client-chosen cookie). */
   "identity.start.binding": { limit: 5, windowSec: 600 },
-  /** D-015 / Q-013 draft: orders per BOOKING session = 3 (window = the 30-minute session). */
+  /** CONFIRMED A-053 ④: orders per BOOKING session = 3 per 30 minutes (the session's fixed lifetime). */
   "order.create.session": { limit: 3, windowSec: 1800 },
-  /** D-015 / Q-013 draft: orders per identity subject and show session = 5 per hour. */
+  /** CONFIRMED A-053 ④: orders per identity subject and show session = 5 per hour. */
   "order.create.subject_session": { limit: 5, windowSec: 3600 },
 } as const satisfies Record<string, { limit: number; windowSec: number } | null>;
 

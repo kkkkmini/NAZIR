@@ -71,3 +71,23 @@ describe("PAGE-06 server startup and the database URLs", () => {
     expect(r.output).not.toContain(SECRET);
   });
 });
+
+describe("TX-U09 server startup and the database pool limits (review M8)", () => {
+  it("test env with a database: development defaults are used and logged (no secret)", async () => {
+    const r = await start({ DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT });
+    expect(r.exited).toBeNull();
+    expect(r.output).toContain("[nazir] database pool");
+    expect(r.output).toContain('\\"poolMax\\":5');
+    expect(r.output).not.toContain(SECRET);
+  });
+  it.each([
+    ["a malformed value", { NAZIR_DB_POOL_MAX: "many" }, /NAZIR_DB_POOL_MAX must be a whole number/],
+    ["a broken ordering", { NAZIR_DB_LOCK_TIMEOUT_MS: "9000" }, /LOCK_TIMEOUT_MS must be less than/],
+  ])("refuses to start with %s", async (_l, env, message) => {
+    const r = await start({ DATABASE_URL: POOLED, DATABASE_URL_UNPOOLED: DIRECT, ...env });
+    expect(r.exited).toBe(1);
+    expect(r.output).toContain("refusing to start");
+    expect(r.output).toMatch(message);
+    expect(r.output).not.toContain(SECRET);
+  });
+});

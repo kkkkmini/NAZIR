@@ -9,6 +9,7 @@ import {
   assertRuntimeDatabaseConfig,
   describeDatabase,
 } from "./server/config/database-config";
+import { assertStartupDbPoolConfig } from "./server/config/db-pool-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "./server/config/runtime-config";
 import { SecretConfigError, assertStartupSecurityConfig } from "./server/lib/secrets";
 import { assertStartupRateLimitConfig } from "./server/rate-limit/config";
@@ -29,6 +30,9 @@ try {
   if (db) {
     console.info("[nazir] database", JSON.stringify(describeDatabase(db.pooled)));
   }
+  // Pool size and time limits (review M8): required in staging/production, development defaults in local/test.
+  const pool = assertStartupDbPoolConfig(process.env, config.runtimeEnv);
+  if (pool) console.info("[nazir] database pool", JSON.stringify(pool));
 } catch (e) {
   if (e instanceof ConfigError || e instanceof DatabaseConfigError || e instanceof SecretConfigError) {
     console.error(`[nazir] refusing to start\n${e.message}`);

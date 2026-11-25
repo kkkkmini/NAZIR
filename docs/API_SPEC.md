@@ -71,6 +71,7 @@
 | `PAYMENT_METHOD_UNAVAILABLE` | 422 | 현재 활성화되지 않은 결제수단·카드사(심사 미완료 등) [확정 D-012] |
 | `RATE_LIMITED` | 429 | 요청 제한. `details.retryAt`(ISO, DB 시각), `details.retryAfterSeconds` |
 | `RATE_LIMIT_UNAVAILABLE` | 503 | rate limit 저장소·설정 사용 불가(fail-closed, A-045). 사용자의 한도 초과와 구분 |
+| `DATABASE_BUSY` | 503 | DB가 제시간에 처리하지 못함: Pool 고갈·트랜잭션 만료(P2028), lock/statement timeout, deadlock 재시도 초과, DB 접속 불가. `details.retryAfterSeconds` + `Retry-After` [A-053 ⑧] |
 | `IDENTITY_START_FAILED` | 502 | 인증사가 시작 요청을 거부하거나 쓸 수 없는 응답 [A-049] |
 | `PROVIDER_UNAVAILABLE` | 503 | PG/인증사 장애 |
 
@@ -503,3 +504,4 @@ v1.0의 `/admin/orders/review-required`, `/admin/orders/{id}/resolve`, `/admin/o
 | 1.1 | 2026-11-14 | 인증 선행 흐름과 인증 세션·브라우저 바인딩·claim API, 쿠키 모델, CSRF, 외부 복귀 경로(서버 결정 returnUrl, 303), 좌석 변경 API 제거 및 주문 취소 API 추가, 주문 생성의 한도·활성 주문 오류, 결제 시작(수단 제한, 최소 잔여 시간), PG 복귀·펜싱·3분 보호·UNKNOWN 응답, webhook 재조회 기반 처리, 소유 주체 Idempotency, 관리자 권한 매트릭스·환불 3단계 API·review case action, 오류 코드 카탈로그 추가. lookup-verification API를 purpose로 통합 |
 | 1.2 | 2026-11-15 | 토스페이먼츠(결제창 API 개별 연동)·NICE아이디(통합인증) 확정 반영. 업체별 복귀 형식 표(§3.4), NICE 인증 URL·결과 요청 흐름(§4.2), 인증 세션 고정 30분·잔여 10분·주문 생성 제한과 오류 코드(§3.2, §4.4), `GET /payment-methods`와 활성 수단만 허용·토스 결제창 파라미터 대응(§4.6, D-011, D-012), 토스 success/fail 복귀와 confirm 멱등·재시도(§4.7), 웹훅 서명·eventId·10초 응답·비동기 조회(§4.9), 환불 `providerRefundId` 선택 입력과 취소 후보 제시(§5.3), `RELEASE_SEATS` → `UNFULFILLED`(§5.4), Mock 판매 금지·Secret 노출 금지(§7). 이전 원문: `docs/archive/v1.1/API_SPEC.md` |
 | 1.2.1 | 2026-11-22 | §4.3 Step 3 구현 기록(응답 형식·오류·캐시). 기존 명세는 변경 없음 |
+| 1.2.2 | 2026-11-25 | §2.1 `DATABASE_BUSY`(503) 추가(A-053). 기존 명세는 변경 없음 |

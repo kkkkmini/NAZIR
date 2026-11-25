@@ -11,6 +11,7 @@ import {
   assertRuntimeDatabaseConfig,
   describeDatabase,
 } from "../src/server/config/database-config";
+import { assertStartupDbPoolConfig } from "../src/server/config/db-pool-config";
 import { ConfigError, describeRuntimeConfig, loadRuntimeConfig } from "../src/server/config/runtime-config";
 import { SecretConfigError, assertStartupSecurityConfig } from "../src/server/lib/secrets";
 import { assertStartupRateLimitConfig } from "../src/server/rate-limit/config";
@@ -25,6 +26,8 @@ try {
     summary.database = describeDatabase(db.pooled);
     if (db.direct) summary.directDatabase = describeDatabase(db.direct);
   }
+  const pool = assertStartupDbPoolConfig(process.env, c.runtimeEnv);
+  if (pool) summary.databasePool = pool;
   console.log(JSON.stringify(summary, null, 2));
 } catch (e) {
   if (e instanceof ConfigError || e instanceof DatabaseConfigError || e instanceof SecretConfigError) {

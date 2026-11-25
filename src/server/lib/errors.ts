@@ -35,6 +35,11 @@ export const ERROR_STATUS = {
   PROVIDER_UNAVAILABLE: 503,
   /** Rate limit store unavailable: fail-closed, distinct from the user's own RATE_LIMITED (A-045). */
   RATE_LIMIT_UNAVAILABLE: 503,
+  /**
+   * The database could not serve the request in time: pool exhausted / transaction expired (P2028), lock or statement
+   * timeout, deadlock retries exhausted, database unreachable (Step 5, review M8). `details.retryAfterSeconds`.
+   */
+  DATABASE_BUSY: 503,
 } as const;
 
 export type ErrorCode = keyof typeof ERROR_STATUS;
@@ -54,6 +59,13 @@ export class AppError extends Error {
 
 export interface ErrorBody {
   error: { code: ErrorCode; message: string; details: Record<string, unknown> };
+}
+
+/** `Retry-After` for a 429/503 AppError that carries `details.retryAfterSeconds` (a positive whole number). */
+export function retryAfterHeader(err: unknown): Record<string, string> {
+  if (!(err instanceof AppError) || (err.status !== 429 && err.status !== 503)) return {};
+  const s = err.details.retryAfterSeconds;
+  return typeof s === "number" && Number.isInteger(s) && s > 0 ? { "Retry-After": String(s) } : {};
 }
 
 /** Never leaks internal error text for non-AppError failures. */

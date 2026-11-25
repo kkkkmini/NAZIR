@@ -319,6 +319,29 @@ SH2·SH9·SH10·SH11·SH12는 입력 해석 규칙이라 단위 테스트가 검
 
 v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌석 변경 제거 [확정 D-001]에 따라 삭제하고 ORD-11~14(취소 후 재예매)로 대체했다.
 
+### 3.1 Step 5 단위 1: 예약 트랜잭션 기반 (TX-*, A-053)
+
+실제 PostgreSQL + Prisma adapter: `tests/contract/schema/booking-tx.test.ts`. 단위: `tests/unit/booking-tx.test.ts`, `tests/unit/startup-guard.test.ts`(TX-U09).
+
+| ID | 시나리오 | 기대 결과 |
+|---|---|---|
+| TX-01 | DB 기본 격리수준을 SERIALIZABLE로 바꾼 뒤 러너 실행 / 같은 pooled 연결에서 트랜잭션 후 설정 확인 | 트랜잭션 안은 `read committed`; `lock_timeout`·`statement_timeout`은 안에서만 설정값, 끝난 뒤 `0` |
+| TX-02 | 다른 연결이 좌석을 잠근 상태 / 재시도 사이에 잠금 해제 | 55P03 2회 후 503 `DATABASE_BUSY`(쓰기 롤백) / 재시도에서 성공 |
+| TX-03 | `pg_sleep(3)`, statement_timeout 300ms | 503, 재시도 없음, 2초 안에 종료 |
+| TX-04 | Pool max=1을 다른 트랜잭션이 점유 / 트랜잭션 `timeout` 초과 | P2028 → 503 + `retryAfterSeconds`, 이후 같은 Pool에서 새 트랜잭션 성공(연결 누수 없음) / 503, 쓰기 롤백 |
+| TX-05 | 지연 constraint trigger가 COMMIT에서 거부 | 모든 문장 수락 후 COMMIT 23514(이름 없음) → 문맥 규칙으로 매핑, 규칙 없으면 500, 주문·결제 원상태 |
+| TX-06 | 문장 시점 23505: 활성 주문 중복 / 좌석 live hold 중복 | `ACTIVE_ORDER_EXISTS` / `SEAT_UNAVAILABLE`, 같은 트랜잭션의 쿼터 행·주문 롤백 |
+| TX-07 | 두 트랜잭션이 좌석을 역순으로 잠금 | deadlock 재현, 재시도로 둘 다 성공 / 재시도 없으면 한쪽 503 |
+| TX-08 | `lockSeatsSorted` 12개 동시 실행(순서 섞음) / 반환값 | 전부 커밋, 재시도 0회 / 정렬 순서, 회차·상태 포함, 없는 id 제외 |
+| TX-09 | `ensureAndLockQuota`: 생성·snapshot 유지 / 회차 없음 / 행 없을 때 동시 2건(커밋·롤백) | `seat_limit` = 생성 당시 회차 한도, 이후 불변 / `null`·행 없음 / 두 번째가 첫 번째 종료까지 대기 후 커밋된 카운터를 읽음, 롤백이면 직접 생성 |
+| TX-10 | fn의 AppError / fn이 DB 오류를 잡고 계속 진행 | 그대로 재전파·쓰기 롤백 / 25P02 → 500, 쓰기 롤백 |
+| TX-11 | 고객 이름·전화번호가 메시지에 들어가는 CHECK 위반 | 원문 오류에는 값이 있음(전제 확인), 러너 로그·응답에는 없음, 로그 1줄(분류·SQLSTATE·제약·시도) |
+| TX-12 | 앱 연결(`getPrisma` + `bookingTxDeps`) | 환경 설정 값 적용(`lock_timeout` 반영), READ COMMITTED, 잘못된 Pool 설정은 요청 시점 fail-closed |
+| TX-U01~U08 | Pool 설정 규칙(기본값·필수·범위·순서), 측정 형태별 분류, backoff 상한, 러너 판단(재시도·503·문맥 매핑·25P02·로그), 좌석 id 정렬, `Retry-After` | |
+| TX-U09 | 서버 기동: Pool 기본값 기록 / 잘못된 값·순서 | 기동·로그(비밀값 없음) / `process.exit(1)` |
+
+**결과(2026-11-25):** unit 449 passed(396 → +53), DB 537 passed(514 → +23). TX DB 테스트는 4회 반복 실행에서 모두 통과.
+
 ## 4. P0 주문/세션/Idempotency
 
 | ID | 시나리오 | 기대 결과 |
@@ -808,3 +831,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.11 | 2026-11-21 | Neon Pooled/Direct 연결 분리: DB-04(단위)·DB-05(CLI)·DB-06(앱 런타임)·DB-07(`check:config`)·SEED-06 신설, 뮤테이션 결과(§2.3). 기존 시나리오 정의는 변경 없음 |
 | 1.2.12 | 2026-11-22 | Step 3 공개 조회 API·화면: §2.5 CAT-API-01~06·CAT-UI-01·CAT-08b, 뮤테이션·수동 확인 결과, `verify:db-session` 스크립트와 PgBouncer 결과. 기존 시나리오 정의는 변경 없음 |
 | 1.2.13 | 2026-11-22 | 통합 리뷰 즉시 수정 반영: CAT-API-07(좌석 정렬), PAGE-01~06(페이지 계층·오류 경계·서버 기동) 신설, 뮤테이션·오류 경계 재시도 실측 결과. 기존 시나리오 정의는 변경 없음 |
+| 1.2.14 | 2026-11-25 | §3.1 Step 5 단위 1 TX-01~12·TX-U01~U09 신설(예약 트랜잭션 러너·잠금 헬퍼·오류 분류·Pool 설정). 기존 시나리오 정의는 변경 없음 |

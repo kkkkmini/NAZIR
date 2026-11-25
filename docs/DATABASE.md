@@ -1382,6 +1382,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.7 | 2026-11-18 | Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사(A-042 보강, §14.1): 환경 규칙(`test` ⇔ `_test`) 동일 적용, 주 DB와 같은 DB 거부, 미설정 시 기존 동작. 다른 항목 변경 없음 |
 | 1.2.8 | 2026-11-20 | Step 3: `timestamptz` 세션 시간대 해석 문제(S11) 실측(§19.5)과 앱·트랜잭션·seed 연결의 `TimeZone=UTC` 고정(§19.12). 스키마·migration·seed 데이터 변경 없음 |
 | 1.2.9 | 2026-11-21 | Neon Pooled(`DATABASE_URL`)/Direct(`DATABASE_URL_UNPOOLED`) 연결 분리와 쌍 검증(§19.12). 스키마·migration 변경 없음 |
+| 1.2.10 | 2026-11-25 | §19.11 COMMIT 시점 오류 설명 정정(제약 이름 없음, 실측), §19.13 Step 5 예약 트랜잭션 기반(러너·잠금 헬퍼·오류 분류·Pool 설정) 추가. 스키마·migration 변경 없음 |
 
 ---
 
@@ -1596,7 +1597,7 @@ npm run test:db
 - Step 3 착수 전 사용자 결정 필요: 없음(D1~D8 확정). Step 5 전: Q-025 세부 형식.
 - **Step 3 구현(2026-11-22):** 공개 조회는 `src/server/catalog/public-catalog.ts`(읽기 전용, 쓰기·잠금·hold 정리 없음). 좌석은 §11.1(`seat-display.ts`), 회차는 §11.11(`sales-status.ts`)로 한 번 읽은 DB 시각 하나로 계산한다. hold 만료는 주문 `hold_expires_at`을 epoch 밀리초로 읽어 비교한다.
 - **2026-11-27 추가 실측(A-051):** constraint trigger가 COMMIT에서 올린 오류는 `DriverAdapterError.cause`에 `originalCode`(예 `23514`)만 있고 **`constraint`가 없다**(adapter-pg 7.10.1, `TABLE`/`CONSTRAINT`를 지정한 RAISE도 동일). 매핑은 SQLSTATE와 트랜잭션 문맥으로 하고 메시지를 파싱하지 않는다. 문장 시점 unique 오류에는 이름이 있다. 구현 `src/server/db/errors.ts`.
-- **Step 5 오류 매핑(S7) 참고 — 2026-11-22 실측:** interactive `$transaction`의 **COMMIT 시점** 제약 오류(지연 제약·지연 constraint trigger)는 `PrismaClientKnownRequestError`로 감싸지지 않고 **`DriverAdapterError`가 그대로** 나온다. SQLSTATE는 `error.cause.originalCode`, 제약 이름은 `error.cause.constraint`에 있다. 문장 시점 오류는 `error.meta.driverAdapterError.cause`에 있다. 두 형태를 모두 처리해야 한다(`scripts/verify-db-session.ts` 4번).
+- **Step 5 오류 매핑(S7) — 2026-11-22 기록의 정정(2026-11-25 재실측, A-051·A-053과 일치):** interactive `$transaction`의 **COMMIT 시점** 제약 오류(지연 제약·지연 constraint trigger)는 `PrismaClientKnownRequestError`로 감싸지지 않고 **`DriverAdapterError`가 그대로** 나오며, SQLSTATE는 `error.cause.originalCode`에 있다. **제약 이름(`cause.constraint`)은 없다** — 2026-11-22 기록의 "제약 이름은 `error.cause.constraint`에 있다"는 틀린 설명이었다(`orders_confirmed_payment_guard`·A-040 claim trigger 모두 실측으로 이름 없음). 문장 시점 오류는 `error.meta.driverAdapterError.cause`에 있고, **이름은 unique(23505)·FK(23503)에만 있다.** 문장 시점 CHECK(23514)·트리거(23001)도 이름이 없다. 따라서 23514·23001은 **트랜잭션 문맥**으로만 도메인 오류에 매핑한다. 메시지는 읽지 않는다(행 값이 들어 있다). 구현·전체 측정 표는 §19.13.
 
 ### 19.12 Step 3: 앱 DB 연결의 세션 시간대 고정 (S11, 2026-11-20)
 
@@ -1607,3 +1608,29 @@ npm run test:db
 - **규칙:** 앱 코드는 `SET [LOCAL] TIME ZONE`을 쓰지 않는다. `DbClock`은 epoch 밀리초로 읽어 세션 시간대와 무관하다(이중 방어).
 - **검증:** TEST_PLAN TZ-01~06. DB 기본 `timezone`을 `Asia/Seoul`로 둔 실제 PostgreSQL에서 앱 경로(`getPrisma()`·`getAppClock()`)로 확인하고, 수정을 제거하면 7개 테스트가 실패함을 확인했다(뮤테이션).
 - **남은 확인:** 트랜잭션 모드 커넥션 풀러(PgBouncer, 호스팅 공급자 pooler)가 `options` 시작 파라미터를 전달·거부·무시하는지는 미검증이다(E-007, §19.10-5). 배포 대상 DB가 정해지면 `SELECT current_setting('TimeZone')`이 `UTC`인지 실제 연결로 확인한다.
+
+### 19.13 Step 5 단위 1: 예약 트랜잭션 기반 (2026-11-25, A-053)
+
+- **러너** `src/server/booking/tx.ts` `runBookingTx`: Prisma interactive transaction, `isolationLevel: ReadCommitted`·`maxWait`·`timeout` 명시, 첫 문장에서 `set_config('lock_timeout'|'statement_timeout', …, true)`(= `SET LOCAL`, COMMIT/ROLLBACK 시 초기화 — 같은 pooled 연결에서 확인). 실패는 항상 롤백 후 분류한다. 앱 연결 `src/server/booking/app-deps.ts`.
+- **잠금 헬퍼** `src/server/booking/locks.ts`: `ensureAndLockQuota`(§11.2 1단계, `INSERT … SELECT max_seats_per_identity … ON CONFLICT (PK) DO NOTHING` + `FOR UPDATE`, 회차 없음 → `null`), `lockSeatsSorted`(uuid 오름차순으로 **좌석별 한 문장씩** `FOR UPDATE` — 순서를 쿼리 계획이 아니라 코드가 보장, 중복·빈 목록·형식 오류 거부, 소속·상태 판단은 호출자).
+- **측정한 오류 구조(Prisma 7.10.1, adapter-pg 7.10.1, pg 8.23.1, PostgreSQL 16)와 처리:**
+
+| 상황 | 형태 | 처리 |
+|---|---|---|
+| 23505 unique(문장) | P2010, `meta.driverAdapterError.cause{originalCode, constraint.index}` | 이름별 규칙, 없으면 500 |
+| 23503 FK(문장) | 위와 같음, 이름 있음 | 이름별 규칙, 없으면 500 |
+| 23514 CHECK(문장) | 위와 같음, **이름 없음** | 트랜잭션 문맥 규칙 |
+| 23514 지연 trigger(COMMIT) | **`DriverAdapterError`**, `cause.originalCode`, **이름 없음** | 트랜잭션 문맥 규칙 |
+| 23001 트리거(문장) | P2010, 이름 없음 | 트랜잭션 문맥 규칙 |
+| 40P01 deadlock / 40001 | P2010 cause | 전체 트랜잭션 재시도(최대 3회, full jitter 25→200ms), 초과 시 503 |
+| 55P03 lock_timeout | P2010 cause | 재시도, 초과 시 503 |
+| 57014 statement_timeout | P2010 cause | 503, 재시도 없음 |
+| 트랜잭션 만료(`timeout`) / Pool 고갈(`maxWait`) | **P2028**, cause 없음(둘을 메시지 없이 구분 불가) | 503, 재시도 없음 |
+| DB 접속 불가 | P1001 | 503 |
+| 오류를 잡고 같은 트랜잭션에서 계속 | 25P02 | 500(프로그래밍 오류), 재시도 없음 |
+| pg Pool `connectionTimeoutMillis` 초과 | **코드 없는 일반 `Error`** | 분류 불가 → 설정 규칙으로 트랜잭션 경로에서 발생 차단(`connectionTimeout > maxWait`) |
+
+- **Prisma `timeout`은 실행 중인 문장을 멈추지 않는다**(1초 문장이 끝난 뒤 COMMIT에서 실패). 그래서 `statement_timeout < transaction timeout`, `lock_timeout < statement_timeout`을 설정 규칙으로 강제한다.
+- **Pool 설정** `src/server/config/db-pool-config.ts`(M8): `NAZIR_DB_POOL_MAX`·`_CONNECTION_TIMEOUT_MS`·`_IDLE_TIMEOUT_MS`·`_TX_MAX_WAIT_MS`·`_TX_TIMEOUT_MS`·`_STATEMENT_TIMEOUT_MS`·`_LOCK_TIMEOUT_MS`. local/test 개발 기본값(5 / 5000 / 10000 / 2000 / 10000 / 5000 / 2000), staging/production은 전부 필수(누락 시 기동 거부, 요청 시점에도 fail-closed). 운영 수치는 **미확정**: Neon pooled 연결 한도와 Vercel 최대 인스턴스 수(E-007)를 받은 뒤 `인스턴스 수 × NAZIR_DB_POOL_MAX < 한도`로 정한다. 그 전에는 Production 준비 완료로 표시하지 않는다.
+- **로그**: 트랜잭션 이름·분류·SQLSTATE·제약 이름·시도 횟수만. 메시지·파라미터는 기록하지 않는다(TX-11: 고객 이름·전화번호가 든 CHECK 오류에서 확인).
+- **남은 일**: S2 교차 불변조건·A-041 로그 보호 migration, Q-025 sequence, 주문 생성 API는 별도 단위. Neon pooler(트랜잭션 모드)에서 `set_config(…, true)`·`FOR UPDATE`·지연 trigger 동작은 미검증(§19.10-5).

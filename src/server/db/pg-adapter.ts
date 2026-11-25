@@ -31,11 +31,16 @@
  */
 import type { PoolConfig } from "pg";
 import { DatabaseConfigError } from "../config/database-config";
+import type { DbPoolConfig } from "../config/db-pool-config";
 
 /** libpq startup `options` value applied to every application connection. */
 export const PG_SESSION_OPTIONS = "-c TimeZone=UTC";
 
-export function buildPgPoolConfig(connectionString: string | undefined, label = "DATABASE_URL"): PoolConfig {
+/**
+ * `pool` (review M8): pool size and connection/idle limits from `loadDbPoolConfig`. Omitted only by callers that open a
+ * short-lived pool of their own (scripts, tests); the application client always passes it (./client.ts).
+ */
+export function buildPgPoolConfig(connectionString: string | undefined, label = "DATABASE_URL", pool?: DbPoolConfig): PoolConfig {
   const normalized = connectionString?.trim();
   if (!normalized) {
     throw new DatabaseConfigError(`${label} is not set`);
@@ -54,5 +59,7 @@ export function buildPgPoolConfig(connectionString: string | undefined, label = 
       );
     }
   }
-  return { connectionString: normalized, options: PG_SESSION_OPTIONS };
+  const base: PoolConfig = { connectionString: normalized, options: PG_SESSION_OPTIONS };
+  if (!pool) return base;
+  return { ...base, max: pool.poolMax, connectionTimeoutMillis: pool.connectionTimeoutMs, idleTimeoutMillis: pool.idleTimeoutMs };
 }
