@@ -1,18 +1,53 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
+import { IdentityCompleteScreen } from "@/components/identity/identity-complete";
+import { isIdentityPurpose } from "@/components/identity/purpose";
+import { isPreviewCallbackResult, PREVIEW_VID } from "@/components/identity/preview-results";
+import { SiteHeader } from "@/components/site/site-header";
+import { nazir } from "@/content/nazir";
+import { getBookingSessions } from "@/server/booking/get-booking-sessions";
+import { getIdentityStartMode } from "@/server/identity/identity-start-mode";
 
-export const metadata: Metadata = { title: "본인인증 확인 | NAZIR", robots: { index: false, follow: false }, referrer: "no-referrer" };
+export const metadata: Metadata = { title: "본인인증 확인 | 뮤지컬 〈나지르〉 | NAZIR" };
 
 /**
- * Landing page after the identity callback's 303 (API_SPEC §4.2). It does NOT show success or failure from the URL:
- * the result is only known to the server and is read by the claim step (not implemented yet, Step 4 next unit), which
- * also checks that this is the same browser. Until then the page only explains what happens next.
+ * A7 인증 복귀 처리 (API §4.2: 콜백 처리 후 303 /identity/complete?vid={id}) — BOOKING·LOOKUP 공통.
+ * 결과와 성공 시 목적은 서버의 claim 응답으로만 정한다. URL 값만으로 성공을 표시하지 않는다.
+ * [DEV] 미리보기는 local/test에서 vid=dev-preview일 때만 허용한다. 미리보기의 purpose 값은
+ * claim 응답을 흉내 낸 것으로, 개발 환경 밖에서는 읽지 않는다(없으면 기존 BOOKING 미리보기로 본다).
  */
-export default function IdentityCompletePage() {
+export default function IdentityCompletePage(props: PageProps<"/identity/complete">) {
   return (
-    <section className="flex flex-col gap-4">
-      <h1 className="text-2xl font-semibold">본인인증 결과 확인</h1>
-      <p className="text-neutral-700">인증 결과를 확인하고 있습니다. 인증을 시작한 같은 브라우저에서만 다음 단계로 진행할 수 있습니다.</p>
-      <p className="text-sm text-neutral-500">예매 단계 연결은 준비 중입니다.</p>
-    </section>
+    <Suspense
+      fallback={
+        <div className="theme-a flex flex-1 flex-col">
+          <SiteHeader tone="light" />
+          <div className="mx-auto h-48 w-full max-w-[45rem] animate-pulse bg-wash motion-reduce:animate-none" />
+        </div>
+      }
+    >
+      <CompleteLoader searchParams={props.searchParams} />
+    </Suspense>
   );
+}
+
+async function CompleteLoader({ searchParams }: { searchParams: PageProps<"/identity/complete">["searchParams"] }) {
+  const [params, mode] = await Promise.all([searchParams, getIdentityStartMode()]);
+  const vid = typeof params.vid === "string" ? params.vid : null;
+  const result = params.result;
+  const purpose = params.purpose === undefined ? "BOOKING" : params.purpose;
+
+  if (mode === "dev-preview" && vid === PREVIEW_VID && isPreviewCallbackResult(result) && isIdentityPurpose(purpose)) {
+    const sessions = await getBookingSessions();
+    return (
+      <IdentityCompleteScreen
+        kind="preview"
+        result={result}
+        claimPurpose={purpose}
+        showTitle={nazir.title}
+        sessions={sessions.kind === "dev-fixture" ? sessions.sessions : null}
+      />
+    );
+  }
+  return <IdentityCompleteScreen kind="not-ready" showTitle={nazir.title} />;
 }
