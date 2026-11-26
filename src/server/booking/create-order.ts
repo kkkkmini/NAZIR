@@ -19,8 +19,11 @@
  *      status log, order access session, outbox event, idempotency COMPLETED
  * Any failure rolls back ALL of it. No provider call happens here.
  *
- * Expired-but-unprocessed orders/holds are NOT cleaned up here yet (expireOrder is the next unit): an expired ACTIVE
- * hold still makes its seat unavailable, an expired PENDING order still counts as the active order — never bypassed.
+ * Pre-cleanup (§11.2 "사전 정리", before the main transaction, each in its OWN transaction): the subject's own due
+ * PENDING orders for this show session and the due PENDING orders holding a requested seat are ended through
+ * expireOrder (ids sorted; expireOrder re-checks everything under quota → order locks and never touches CONFIRMING).
+ * The main transaction does not trust the cleanup: an expired ACTIVE hold that is still ACTIVE (cleanup failed or lost
+ * a race) keeps its seat unavailable, an expired PENDING order still counts as the active order — never bypassed.
  */
 import { randomBytes } from "node:crypto";
 import type { PolicyName, RateLimitPolicy } from "../rate-limit/policies";
@@ -33,6 +36,7 @@ import { AppError } from "../lib/errors";
 import type { Keyring } from "../lib/secrets";
 import { acquireIdempotency, completeIdempotency, idempotencyOwnerHash, requestHash } from "./idempotency";
 import { ensureAndLockQuota, lockSeatsSorted } from "./locks";
+import { expireOrder } from "./order-lifecycle";
 import { nextOrderNumber } from "./order-number";
 import { runBookingTx, type BookingTxDeps, type ConstraintRules } from "./tx";
 
@@ -200,7 +204,48 @@ async function renewAccess(tx: SqlExecutor, orderId: string, bindingHash: string
   return { cookieName: accessCookieName(orderId), token, maxAgeSeconds: Math.max(1, Number(rows[0].max_age)) };
 }
 
+/** At most this many orders are ended by one request's pre-cleanup (own orders + one per requested seat is far below). */
+export const PRE_CLEANUP_MAX_ORDERS = 20;
+
+/**
+ * Finds (read-only, no locks) and ends due PENDING orders that stand in the way of this request. Runs only for a request
+ * with a valid BOOKING session of this browser, so an anonymous request triggers no work. Failures are logged and
+ * skipped: the main transaction re-checks everything and stays conservative.
+ */
+async function preCleanup(deps: CreateOrderDeps, input: CreateOrderInput): Promise<void> {
+  let ids: string[];
+  try {
+    ids = await runBookingTx(deps.tx, {
+      name: "order.precleanup.scan",
+      fn: async (tx) =>
+        (
+          await tx<{ id: string }>(
+            `WITH s AS (SELECT "identity_subject_id" FROM "identity_sessions"
+                         WHERE "token_hash" = $1 AND "browser_binding_hash" = $2 AND "status" = 'ACTIVE' AND "expires_at" > now() AND "purpose" = 'BOOKING')
+             SELECT o."id" FROM "orders" o
+              WHERE EXISTS (SELECT 1 FROM s) AND o."status" = 'PENDING' AND o."hold_expires_at" <= now()
+                AND ((o."identity_subject_id" IN (SELECT "identity_subject_id" FROM s) AND o."show_session_id" = $3::uuid)
+                     OR o."id" IN (SELECT h."order_id" FROM "seat_holds" h WHERE h."session_seat_id" = ANY($4::uuid[]) AND h."status" = 'ACTIVE'))
+              ORDER BY o."id" LIMIT $5::int`,
+            [input.sessionTokenHash, input.bindingHash, input.request.sessionId, input.request.sessionSeatIds, PRE_CLEANUP_MAX_ORDERS],
+          )
+        ).map((r) => r.id),
+    });
+  } catch (e) {
+    console.warn("[order-create] pre-cleanup scan skipped:", e instanceof AppError ? e.code : e instanceof Error ? e.name : typeof e);
+    return;
+  }
+  for (const id of ids) {
+    try {
+      await expireOrder(deps.tx, id, "SYSTEM");
+    } catch (e) {
+      console.warn(`[order-create] pre-cleanup of order ${id} skipped:`, e instanceof AppError ? e.code : e instanceof Error ? e.name : typeof e);
+    }
+  }
+}
+
 export async function createOrder(deps: CreateOrderDeps, input: CreateOrderInput): Promise<CreateOrderResult> {
+  await preCleanup(deps, input);
   const random = deps.random ?? randomBytes;
   const req = input.request;
   const n = req.sessionSeatIds.length;

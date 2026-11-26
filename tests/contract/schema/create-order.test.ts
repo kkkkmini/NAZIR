@@ -283,7 +283,7 @@ describe("CO-04~09 rejections (nothing is written)", () => {
     expect(await q(`SELECT 1 FROM orders WHERE show_session_id = $1`, [w.sessionId])).toHaveLength(0);
   });
 
-  it("CO-09 seats: SOLD, BLOCKED, held by another order (even if its order expired), another session's seat, unknown id → 409 with the ids", async () => {
+  it("CO-09 seats: SOLD, BLOCKED, held by another live order, another session's seat, unknown id → 409 with the ids; a seat held by an EXPIRED order is freed by pre-cleanup", async () => {
     const w = await world();
     const w2 = await world();
     const holder = await person();
@@ -299,12 +299,17 @@ describe("CO-04~09 rejections (nothing is written)", () => {
     await q(`UPDATE session_seats SET status = 'BLOCKED' WHERE id = $1`, [w.seats[1]]);
     const p = await person();
     const ghost = randomUUID();
-    for (const seat of [w.seats[0], w.seats[1], w.seats[2], w.seats[3], w2.seats[0], ghost]) {
+    for (const seat of [w.seats[0], w.seats[1], w.seats[2], w2.seats[0], ghost]) {
       const e = await order(p, w, [seat, w.seats[5]]).catch((x) => x);
       expect([e.code, e.details], seat).toEqual(["SEAT_UNAVAILABLE", { unavailableSeatIds: [seat] }]);
     }
     expect(await footprint(p, w)).toEqual(EMPTY);
     expect(h.status).toBe(201);
+    // the expired (not yet processed) holder: pre-cleanup ends it through expireOrder, then the seat is booked
+    const freed = await order(p, w, [w.seats[3]]);
+    expect(freed.status).toBe(201);
+    const [old] = await q(`SELECT o.status, array_agg(l.to_status || ':' || l.source ORDER BY l.created_at) AS logs FROM orders o JOIN order_status_logs l ON l.order_id = o.id WHERE o.id = $1 GROUP BY o.status`, [eh.body.orderId]);
+    expect(old).toEqual({ status: "EXPIRED", logs: ["PENDING:API", "EXPIRED:SYSTEM"] });
   });
 
   it("CO-09b request validation: duplicate seat, empty list, extra field, bad ids → 400 before any database work", () => {
