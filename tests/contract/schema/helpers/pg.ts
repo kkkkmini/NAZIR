@@ -92,9 +92,33 @@ export async function createDatabase(server: TestServer, name: string, template?
   await withAdmin(server, (c) => c.query(`CREATE DATABASE ${q(name)}${template ? ` TEMPLATE ${q(template)}` : ""}`));
 }
 
-export async function dropDatabase(server: TestServer, name: string): Promise<void> {
+/**
+ * Drops a throwaway database once nothing is connected to it any more.
+ *
+ * Why wait: `pool.end()` (pg-pool 3.14) and Prisma's `$disconnect()` resolve as soon as Terminate has been SENT to each
+ * backend, not when the backend has exited. Dropping `WITH (FORCE)` in that window kills the exiting backend, which
+ * sends FATAL 57P01 ("terminating connection due to administrator command") to a pg client nobody listens to any more —
+ * Vitest then reports it as an "Unhandled Error" even though every test passed. Waiting for pg_stat_activity to show no
+ * backend for the database removes the race. `WITH (FORCE)` stays as the fallback: a connection still open after the
+ * wait is a real leak in the calling test file, and it is reported instead of hidden.
+ */
+export async function dropDatabase(server: TestServer, name: string, waitMs = 10_000): Promise<void> {
   assertThrowaway(name);
-  await withAdmin(server, (c) => c.query(`DROP DATABASE IF EXISTS ${q(name)} WITH (FORCE)`));
+  await withAdmin(server, async (c) => {
+    const deadline = Date.now() + waitMs;
+    let open = 0;
+    for (;;) {
+      const { rows } = await c.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [name],
+      );
+      open = rows[0].n;
+      if (open === 0 || Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (open > 0) console.warn(`[test-db] ${open} connection(s) still open to ${name} after ${waitMs} ms: a pool was not closed; forcing the drop`);
+    await c.query(`DROP DATABASE IF EXISTS ${q(name)} WITH (FORCE)`);
+  });
 }
 
 /** Drops throwaway databases left behind by crashed runs (older than one hour). */
