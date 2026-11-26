@@ -285,7 +285,7 @@ Mock은 서버 전용 모듈이며 클라이언트 번들에 포함하지 않는
 
 | 작업 | 주기(권장) | 역할 |
 |---|---|---|
-| hold 만료 | 1분 | `PENDING` + `hold_expires_at` 경과 주문 `expireOrder` |
+| hold 만료 | 1분(권장, Q-038) | `PENDING` + `hold_expires_at` 경과 주문 `expireOrder`. **구현**: `GET /api/v1/internal/jobs/expire-orders`(Bearer `CRON_SECRET`), 읽기 전용 후보 조회 + 주문별 `expireOrder`(DATABASE §19.17) |
 | 결제 확인·재조회 | 1분 | CONFIRMING 3분 경과 → UNKNOWN(Tx3), UNKNOWN 재조회, 경보 |
 | READY 정리 | 1분 | `checkout_expires_at` 경과 READY → CANCELED |
 | 인증 정리 | 5분 | 만료 인증·세션 상태 전이 |
@@ -344,3 +344,4 @@ Mock은 서버 전용 모듈이며 클라이언트 번들에 포함하지 않는
 | 1.1 | 2026-11-14 | 파일명 `ARCHITECTURE.md`로 정정. 인증 선행 흐름(시퀀스 다이어그램), identity 모듈, 7분 점유와 3분 결제 확인 보호 구분, Tx1/confirm/Tx2/Tx3 상태 전이와 안전성 근거, UNKNOWN 해소 장치, Provider adapter 인터페이스와 mock 장애 주입 요건, 전역 잠금 순서, 백그라운드 작업 목록, 호스팅 확인 항목, 보안(바인딩·복귀 경로·rate limit 저장소) 추가 |
 | 1.2 | 2026-11-15 | 토스페이먼츠(결제창 API 개별 연동)·NICE아이디(통합인증) 확정. §6 Provider 인터페이스를 원문 기준 최종안으로 교체(정규화 원칙, NICE 결과 요청·복호화, 토스 confirm·orderId 조회·웹훅 서명), Mock 범위, Provider 단계(MOCK/SANDBOX/LIVE)와 fail-closed 기동 검사, Mock 빌드 제거 비교, 웹훅 처리 구조, 비밀값·거래 문맥 분리. §5.2a confirm timeout과 3분 보호 관계. §8 웹훅 처리·NICE 토큰 갱신 작업. §9 환경별 provider 매트릭스, NICE Outbound IP, 카드사 심사용 공개 사이트. 이전 원문: `docs/archive/v1.1/ARCHITECTURE.md` |
 | 1.2.4 | 2026-11-17 | §6 결제 adapter 출력에 PG 결제수단 원문 `methodRaw` 추가(`DATABASE.md` §7.1, A-039). 구조·책임은 변경 없음 |
+| 1.2.5 | 2026-11-26 | §8 hold 만료 작업 구현 표기. 설계는 변경 없음 |

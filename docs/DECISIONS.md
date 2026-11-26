@@ -107,6 +107,7 @@
 | A-051 | **Claim·인증 세션(사용자 결정·구현 2026-11-27).** ① **Claim 유효기간 5분 확정**: DB의 `verified_at` 기준 `claim_expires_at = verified_at + 5분`, DB `now() < claim_expires_at`일 때만 허용(경계 시각은 거부). ② Claim 한 트랜잭션: 인증 행 잠금 → 바인딩 일치(불일치 401 `BROWSER_BINDING_MISMATCH`) → (바인딩, purpose) advisory lock → `VERIFIED`·창 안이면 같은 바인딩·purpose의 ACTIVE 세션 `REVOKED` → 인증 `CONSUMED` → 새 세션(토큰 256bit, DB에는 SHA-256만). 하나라도 실패하면 전체 롤백. 새 부분 unique `identity_sessions_active_binding_uq`(바인딩·purpose당 ACTIVE 1개)로 A-009 규칙을 DB가 보장. 세션 만료: BOOKING 고정 30분(D-015), LOOKUP 10분(A-052로 확정). sliding 없음. ③ **응답 유실 복구**: 같은 브라우저가 창 안에서 다시 claim하면, 그 인증의 세션이 ACTIVE·미만료·**한 번도 사용되지 않음**(`last_used_at IS NULL`)일 때만 같은 세션 행의 토큰을 새로 바꿔 준다(만료 연장 없음, 이전 토큰 즉시 무효). 그 밖에는 재인증. 토큰을 저장·반환하는 복구는 하지 않는다. 한계: 창(5분) 안에 바인딩 쿠키와 CSRF 토큰을 함께 탈취한 공격자는 미사용 세션을 가져갈 수 있다 — 바인딩 쿠키 탈취는 세션 쿠키 탈취와 같은 수준(둘 다 HttpOnly·__Host-)이라 위험 증가는 제한적으로 판단. 원치 않으면 이 복구만 끄고 재인증으로 대체할 수 있다. ④ `GET /identity-session`: 두 쿠키 모두 일치·ACTIVE·DB 시각 미만료일 때 `{purpose, expiresAt, displayName(마스킹)}`, `last_used_at`만 갱신(`expires_at` 불변). 다른 브라우저로 복사된 토큰은 401 `BROWSER_BINDING_MISMATCH`. `DELETE`: CSRF 필수, 두 쿠키가 모두 맞는 그 세션만 폐기, 쿠키는 같은 속성 + Max-Age=0으로 삭제, 반복 호출 204. CSRF 실패 시 폐기·삭제 없음. ⑤ **M7(부분)**: `src/server/db/errors.ts`의 `dbConstraintOf`가 문장 시점(`meta.driverAdapterError.cause`), COMMIT 시점(`DriverAdapterError.cause.originalCode`), node-pg 세 형태를 처리. **실측: adapter-pg 7.10.1은 constraint trigger의 COMMIT 오류에서 제약 이름을 넘기지 않는다**(SQLSTATE만). claim은 23514(이름 없음 또는 A-040 이름)를 422 `IDENTITY_VERIFICATION_FAILED`로, 다른 제약 이름은 매핑하지 않는다(500). 메시지는 읽지 않는다. | API §3.2, §4.2, DATABASE §6.3, M7 |
 | A-052 | **LOOKUP 세션·응답 유실 복구 확정(사용자 결정 2026-11-27).** ① 세션 수명: BOOKING 고정 30분(D-015), **LOOKUP 고정 10분**, 둘 다 sliding 없음, 만료는 DB `now() >= expires_at`. ② 응답 유실 복구 **유지**, 조건(모두 SQL에서 DB 시각으로): 같은 verificationId, 인증 `CONSUMED`, 저장된 바인딩 hash = 현재 브라우저, 세션이 **그 인증의 세션**(`identity_verification_id = id`)이고 같은 바인딩, `ACTIVE`·미만료, `last_used_at IS NULL`, **`now() < 세션 created_at + 5분`**. 기준은 최초 claim 트랜잭션 시각(세션 `created_at`, DB가 기록 — COMMIT보다 수 ms 앞서므로 실제 창은 5분 이하)이며 인증의 `claim_expires_at`과 **무관**하다(A-051 ③의 "창 안" 표현을 이 조건으로 대체). 복구는 `token_hash`만 새 난수의 hash로 교체(같은 행, `expires_at` 불변, 인증 `CONSUMED` 유지, 이전 토큰 즉시 무효). | A-051, D-015 |
 | A-053 | **Step 5 정책 결정(사용자 승인 2026-11-25).** ① **Git**: Step 4 브랜치(`2996b43`)를 세션 브랜치 `claude/pensive-allen-5djvof`로 `--ff-only` 이동 후 이 브랜치에서만 작업·push. ② **주문번호(Q-025 확정)**: `NZ-YYYYMM-NNNNNN`, 전역 PostgreSQL sequence 1개(월별 초기화 없음), `YYYYMM`은 DB 시각을 `Asia/Seoul`로 **명시 변환**한 값, 최소 6자리 0 채움·초과 시 자릿수 자동 확장, 롤백 결번 허용. 주문번호는 인증 비밀값·조회 접근 토큰으로 쓰지 않는다(ORD-11). ③ **S2 DB 방어**: live hold(`ACTIVE`/`CONFIRMING`) INSERT/UPDATE 시 좌석 행을 `FOR SHARE`로 읽어 `AVAILABLE`이 아니면 거부, 좌석을 `SOLD`로 바꾸는 트랜잭션은 COMMIT 시점에 그 좌석의 live hold가 없어야 한다(지연 constraint trigger). live 판정 규칙·잠금 순서는 기존 그대로. ④ **주문 생성 rate limit 확정(Q-013)**: `order.create.session` 3회/30분, `order.create.subject_session` 5회/1시간. 같은 키·같은 본문의 멱등 재요청은 횟수를 소비하지 않고, 새 Idempotency-Key는 새 요청으로 센다. ⑤ **주문 확인 접근 세션 수명(Q-013 확정)**: `min(회차 종료 시각 + 24시간, 발급 시각 + 30일)`, DB 시각 기준, sliding 없음. 인증 세션과 별개이며 만료는 주문 데이터 삭제가 아니다(만료 후 재인증으로 접근). ⑥ **멱등성 보존 24시간**: 키 원문 대신 hash, 소유 주체(인증 주체 + 바인딩)·scope 귀속, 같은 키·다른 본문은 409, 성공 결과 동일 재반환, 409·422 업무 거절은 완료 결과로 저장하지 않음(롤백), 동시 요청에도 주문 1건. ⑦ **A-041 확장**: `order_status_logs`·`seat_status_logs` UPDATE/DELETE 차단, `seat_holds` DELETE 차단(상태 변경은 UPDATE). ⑧ **M8 Pool**: 환경별 Pool max·연결 대기·idle·Prisma `maxWait`/`timeout`·`statement_timeout`·`lock_timeout`. local/test 명시 개발 기본값, staging/production 누락 시 fail-closed. Neon pooled 한도·Vercel 최대 인스턴스 수 확인 전에는 운영 수치를 확정하지 않고 Production 준비 완료로 표시하지 않는다. Pool 고갈·트랜잭션 만료는 503 `DATABASE_BUSY` + `Retry-After`. **구현 상태**: 2026-11-25 ⑧과 예약 트랜잭션 기반(DATABASE §19.13). 2026-11-25 ③⑦(DATABASE §19.14 — live hold 정의는 기존 `ACTIVE`/`CONFIRMING` 그대로이며 주문 만료 시각이 지난 `ACTIVE`도 `expireOrder` 전까지 live; ③의 COMMIT 검사는 COMMIT 시점 조회가 커밋된 hold를 보도록 `SOLD` 전환에 READ COMMITTED를 요구 — A-029의 기존 규칙을 DB가 강제). 2026-11-26 ②(주문번호 sequence·형식 CHECK, DATABASE §19.15), ④⑤⑥(주문 생성 API·rate limit·접근 세션·멱등성, DATABASE §19.16; 미결 세부 Q-034~Q-036). | Q-013, Q-025, S2, S10, M7, M8, A-041 |
+| A-054 | **Q-034~Q-036 확정 + 주문 생애주기 구현(사용자 결정 2026-11-26).** ① **Q-034**: 회차 `ends_at`이 없으면 주문 확인 접근 세션 만료 = `min(starts_at + 24시간, 발급 + 30일)`(DB 시각) — 구현(`COALESCE(ends_at, starts_at)`)과 일치. ② **Q-035**: 주문 생성 rate limit은 **성공한 주문만** 센다. 업무 거절(409·422)·실패는 롤백과 함께 카운터 증가도 취소된다. 실패 요청만 반복하는 남용을 막는 별도 제한은 아직 없다 → **실판매 전 선행 과제**(IMPLEMENTATION_PLAN Step 5 행). ③ **Q-036**: 멱등성 소유 주체 = 도메인 분리 SHA-256(`nazir:idempotency-owner:` ‖ `identity_subject_id` ‖ `browser_binding_hash`). 입력은 내부 주체 UUID(DI와 무관)와 바인딩 쿠키의 SHA-256뿐이며 원본 DI·DI HMAC·이름·전화번호·세션 토큰은 쓰지 않는다. 키를 쓰지 않으므로 24시간 보존 중 키 교체·DI 키 교체·개인정보 파기의 영향을 받지 않는다(DATABASE §5.8 정정). ④ **구현**: `expireOrder`(§11.4), 주문 생성 사전 정리(§11.2), 정기 만료 작업(`GET /api/v1/internal/jobs/expire-orders`, `Bearer CRON_SECRET`), 취소 API(§11.5) — DATABASE §19.17. 미결: Q-037(취소 시 접근 세션), Q-038(정기 작업 주기·`CRON_SECRET` 필수화). | Q-034, Q-035, Q-036 |
 
 ### 2.1 Step 2 구현 결정 D1~D8 [채택 — 사용자 승인 2026-11-16]
 
@@ -390,19 +391,33 @@
 - **질문:** A-053 ⑤ `min(공연 종료 시각 + 24시간, 발급 + 30일)`의 "종료 시각"은 `show_sessions.ends_at`인데 이 컬럼은 NULL을 허용한다.
 - **현황(구현 기본값):** `COALESCE(ends_at, starts_at) + 24시간`(시작 시각으로 대체 — 접근 기간이 더 짧아지는 쪽). 회차 등록 시 `ends_at`을 필수로 하는 안도 있다.
 - **선택지:** (a) 현행(시작 시각 대체), (b) `ends_at` 없으면 30일 상한만 적용, (c) 회차 `ends_at` 필수화(migration).
-- **결정 담당:** 사용자. **상태:** **미결정(기본값으로 구현).**
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-26, A-054 ①)** — (a) 시작 시각 + 24시간, 30일 상한.
 
 ### Q-035. 거절된 신규 주문 요청의 주문 생성 횟수 집계 (Step 5)
 - **질문:** `order.create.*` 카운터는 주문 트랜잭션 안에서 증가하므로, 그 요청이 업무 거절(좌석 없음·한도 초과 등)·실패로 롤백되면 카운터 증가도 함께 롤백된다. 즉 **성공한 주문 생성만 센다**(D-015 "주문 생성 횟수" 문언과 일치). 동시 동일 요청의 중복 집계를 막기 위한 구조다(TEST CO-12, IDM-05).
 - **영향:** 실패 요청만 반복하는 남용은 이 카운터로 막히지 않는다(바인딩·세션·인증 시작 제한, DB 부하는 lock/statement timeout이 한정).
 - **선택지:** (a) 현행(성공만 집계), (b) 거절 시 별도 짧은 트랜잭션으로 카운터만 증가(동시 동일 요청 보호는 유지 가능하나 경로 복잡).
-- **결정 담당:** 사용자. **상태:** **확인 요청(현행으로 구현).**
+- **결정 담당:** 사용자. **상태:** **확정(2026-11-26, A-054 ②)** — (a) 성공만 집계. 실패 반복 남용 대비 제한은 실판매 전 선행 과제.
 
 ### Q-036. 멱등성 소유 주체 해시 방식 (Step 5)
 - **질문:** DATABASE §5.8은 `owner_key_hash = HMAC(identity_subject_id ‖ browser_binding_hash)`라고 적는다. 두 입력은 이미 DB에 저장된 값(주체 ID, 바인딩의 SHA-256)이라 비밀 키를 써도 추가 보호가 없고, 키 교체 시 24시간 안의 재요청이 다른 소유 주체로 보이는 부작용이 있다.
 - **현황(구현):** 도메인 분리 SHA-256(`nazir:idempotency-owner:` 접두). 소유 주체 구분·충돌 저항은 같다.
 - **선택지:** (a) 현행 SHA-256 + 문서 정정, (b) HMAC(별도 키링 또는 기존 키링 용도 분리)로 변경.
-- **결정 담당:** 사용자/개발. **상태:** **확인 요청(현행으로 구현, §5.8 문언과 다름).**
+- **결정 담당:** 사용자/개발. **상태:** **확정(2026-11-26, A-054 ③)** — (a) 도메인 분리 SHA-256, DATABASE §5.8 정정.
+
+### Q-037. 주문 취소 시 주문 확인 접근 세션의 처리 (Step 5)
+- **질문:** 취소·만료된 주문의 `order_access_sessions`는 현재 `ACTIVE`로 남는다(확인서 조회용 읽기 전용, §5.6). 같은 키 재요청은 그 토큰을 갱신한다(TEST CN-12).
+- **선택지:** (a) 현행 유지(취소된 주문도 그 브라우저에서 상태 확인 가능), (b) 취소·만료 시 `REVOKED`.
+- **권장:** (a). 조회만 가능하고 바인딩에 묶여 있어 위험 증가가 없고, 사용자가 취소 결과를 확인할 수 있다.
+- **결정 담당:** 사용자. **상태:** **미결정(현행 a로 구현).**
+
+### Q-038. 정기 만료 작업의 실행 주기와 `CRON_SECRET` 필수화 (Step 5)
+- **질문:** ARCHITECTURE §8의 권장 주기는 1분이지만 확정되지 않았다(E-007). 작업은 `CRON_SECRET`이 없으면 503으로 실행을 거부할 뿐이며, staging/production 기동 검사는 아직 이를 요구하지 않는다.
+- **현황:** 주문 생성 사전 정리가 막힌 좌석·본인 주문을 직접 정리하므로 작업이 늦어도 정합성은 유지된다. 작업 지연의 영향은 화면의 "점유 중" 표시가 길어지고 쿼터가 늦게 복구되는 것(사용자는 재시도로 해결)이다.
+- **권장:** 1분(`* * * * *`). Vercel에서 분 단위 cron은 플랜 제약이 있다(Hobby는 일 단위만 — 공식 문서로 재확인 필요). 비용은 실행 횟수(월 약 43,200회)와 실행 시간(대상이 없으면 짧은 조회 1회)에 비례한다. staging/production 기동 검사에 `CRON_SECRET`(32자 이상) 필수화를 권장한다.
+- **결정 담당:** 사용자(호스팅 플랜과 함께). **상태:** **미결정.** `vercel.json`은 추가하지 않았다.
+
+---
 
 ---
 
@@ -434,6 +449,7 @@
 | 1.2.5 | 2026-11-18 | A-039 보강: CHECK `payments_unapproved_method_matches_request_ck` 추가(미승인 결제의 `method_type`은 요청 수단과 같아야 함). 다른 결정은 변경 없음 |
 | 1.2.6 | 2026-11-18 | A-042 신설(PR #2 기술 리뷰 후속): 승인된 결제의 승인 증거 불변, 환불 핵심 필드 불변과 `SEAT` 환불 합계 검사, Prisma CLI 환경 가드. A-041의 refunds UPDATE 허용은 유지. 다른 결정은 변경 없음 |
 | 1.2.7 | 2026-11-18 | A-042 ③ 보강: Prisma CLI 환경 가드가 `SHADOW_DATABASE_URL`도 검사하고 주 DB와 같은 DB를 거부. 다른 결정은 변경 없음 |
+| 1.2.20 | 2026-11-26 | A-054 신설(Q-034~Q-036 확정, 주문 만료·사전 정리·정기 작업·취소 구현). Q-037(취소 시 접근 세션)·Q-038(작업 주기·`CRON_SECRET` 필수화) 신설 |
 | 1.2.19 | 2026-11-26 | 주문 생성 API 구현 기록(A-053 ④⑤⑥). Q-034(`ends_at` 없는 회차의 접근 세션 만료)·Q-035(거절된 요청의 주문 생성 횟수 집계)·Q-036(멱등성 소유 주체 해시) 신설. 기존 결정은 변경 없음 |
 | 1.2.18 | 2026-11-26 | Q-025 구현 기록, A-053 구현 상태 갱신(②). 1.2.17의 날짜 표기 정정(11-28 → 11-25). 결정 내용은 변경 없음 |
 | 1.2.17 | 2026-11-25 | A-053 구현 상태 갱신(③ S2 트리거, ⑦ A-041 확장). 결정 내용은 변경 없음 |

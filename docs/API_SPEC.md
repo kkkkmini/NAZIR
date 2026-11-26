@@ -295,6 +295,16 @@
 - `PAYMENT_CONFIRMING`/`PAYMENT_UNKNOWN`/`REVIEW_REQUIRED`: 409 `PAYMENT_IN_PROGRESS`.
 - 이미 `CANCELED`/`EXPIRED`: 멱등 성공(현재 상태 반환).
 
+**구현(2026-11-26, DATABASE §19.17)**
+- 검사 순서: 바인딩 쿠키 401 → Origin·CSRF 403 → 인증 세션 쿠키 401 → `orderId` 형식 400 → 본문(비어 있거나 `{}`만) 400 → (트랜잭션) 세션 401/403(LOOKUP) → 주문 없음·다른 주체 404 `NOT_FOUND` → 상태 판정.
+- 200 `{orderId, orderNumber, status}`. `status`는 `CANCELED`, 또는 점유 시간이 이미 지난 `PENDING`이었다면 `EXPIRED`.
+- `PAID`/`UNFULFILLED`/`REFUNDED`: 409 `INVALID_STATE_TRANSITION`(환불은 관리자 절차). DB 혼잡 503 `DATABASE_BUSY` + `Retry-After`.
+- 재예매는 새 `Idempotency-Key`로 `POST /orders`. 원래 키는 원래 주문의 생성 응답을 그대로 재반환한다.
+
+### 4.10 내부 작업: 점유 만료 (구현 2026-11-26)
+
+`GET /api/v1/internal/jobs/expire-orders` — 외부 공개 API가 아니다. `Authorization: Bearer <CRON_SECRET>`(32자 이상) 필수. 불일치·없음 401 `JOB_UNAUTHORIZED`, 서버에 비밀값이 없으면 503 `JOB_UNAVAILABLE`(실행하지 않음). 200 `{scanned, expired, releasedSeats, alreadyEnded, notDue, needsReview, failed}`, `no-store`. 중복·동시 호출에 안전(DATABASE §19.17). 주기는 Q-038.
+
 ### 4.6 결제 시작
 
 `POST /orders/{orderId}/payments` — BOOKING 세션, CSRF, `Idempotency-Key` 필수.
@@ -518,3 +528,4 @@ v1.0의 `/admin/orders/review-required`, `/admin/orders/{id}/resolve`, `/admin/o
 | 1.2.2 | 2026-11-25 | §2.1 `DATABASE_BUSY`(503) 추가(A-053). 기존 명세는 변경 없음 |
 | 1.2.3 | 2026-11-26 | §4.4 `orderNumber` 형식·의미(Q-025) 명시. 기존 명세는 변경 없음 |
 | 1.2.4 | 2026-11-26 | §4.4 주문 생성 구현 기록(검사 순서·오류·멱등 재요청·접근 쿠키). 기존 명세는 변경 없음 |
+| 1.2.5 | 2026-11-26 | §4.5 취소 구현 기록, §4.10 내부 점유 만료 작업 추가. 기존 명세는 변경 없음 |

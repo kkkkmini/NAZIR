@@ -467,7 +467,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 |---|---|---|
 | `id` | uuid | PK |
 | `scope` | varchar(200) | NOT NULL, **실제 경로 값 포함**: `POST /orders`, `POST /orders/{실제 orderId}/payments` |
-| `owner_key_hash` | varchar(255) | NOT NULL, `HMAC(identity_subject_id ‖ browser_binding_hash)` |
+| `owner_key_hash` | varchar(255) | NOT NULL, 도메인 분리 `SHA-256("nazir:idempotency-owner:" ‖ identity_subject_id ‖ browser_binding_hash)`. 입력은 내부 주체 UUID와 바인딩 쿠키의 SHA-256뿐(원본 DI·이름·전화·토큰 미사용, 키 없음 → 키 교체 무관) [확정 Q-036, A-054] |
 | `idempotency_key_hash` | varchar(255) | NOT NULL, 클라이언트 키의 hash |
 | `request_hash` | varchar(255) | NOT NULL, 정규화된 요청 본문 hash |
 | `resource_type` | varchar(50) | NULL 가능, `ORDER`, `PAYMENT` |
@@ -1021,7 +1021,7 @@ Phase 1: 운영자가 **DB에 환불 요청을 먼저 기록**하고, PG 관리�
 4. `ACTIVE` hold → `EXPIRED`, 주문 → `EXPIRED`(`closed_at`), `counted_seats -= n`.
 5. 로그·outbox 삽입 후 커밋.
 
-정기 만료 작업은 권장 1분 주기로 실행한다[외부 확인 E-007]. 작업이 지연되어도 주문 생성·차단 경로가 직접 정리하므로 정합성은 유지된다.
+정기 만료 작업은 권장 1분 주기로 실행한다[외부 확인 E-007, Q-038]. 작업이 지연되어도 주문 생성·차단 경로가 직접 정리하므로 정합성은 유지된다. **구현(2026-11-26): §19.17.**
 
 ### 11.5 취소 후 재예매 [확정 D-001]
 
@@ -1389,6 +1389,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.11 | 2026-11-25 | §19.14 S2 좌석·hold 불변조건 트리거와 A-041 확장(상태 이력 append-only, hold DELETE 차단), §13.3·§19.8 갱신. migration `20261128120000_seat_hold_invariants` |
 | 1.2.12 | 2026-11-26 | §19.15 주문번호 sequence·`next_order_number()`·형식 CHECK(Q-025), §5.1·§13.3 갱신. 1.2.11의 날짜 표기 정정(11-28 → 11-25) |
 | 1.2.13 | 2026-11-26 | §19.16 주문 생성 트랜잭션·멱등성·접근 세션 갱신·rate limit 순서. 스키마 변경 없음 |
+| 1.2.14 | 2026-11-26 | §5.8 `owner_key_hash` 정의 정정(Q-036), §11.4 구현 표기, §19.17 만료·사전 정리·정기 작업·취소. 스키마 변경 없음 |
 
 ---
 
@@ -1719,3 +1720,25 @@ migration `20261129120000_order_number_sequence`(raw SQL, `BEGIN; … COMMIT;`, 
 **멱등성 소유 주체**: 도메인 분리 SHA-256(Q-036, §5.8의 HMAC 문언과 다름). 키 hash도 SHA-256. 원문 키는 저장·로그하지 않는다. 보존 24시간, 경계 `expires_at <= now()`이면 만료.
 
 **동시성 검증(TEST §3.4)**: 같은 키 8건 → 주문 1·재반환 7·정책별 카운터 +1, 다른 주체 8명 같은 좌석 → 1건, 한 주체 5건 → 1건(나머지 `ACTIVE_ORDER_EXISTS`), 겹치는 2석 10건 → deadlock 0·전부 아니면 전무, 쿼터 행 없는 상태의 두 브라우저 동시 주문 → 1건.
+### 19.17 Step 5 단위 5: 주문 만료·사전 정리·정기 작업·취소 (2026-11-26, A-054)
+
+코드: `src/server/booking/order-lifecycle.ts`(`expireOrder`, `cancelOrder`), `create-order.ts`(사전 정리), `expiry-job.ts`·`expiry-job-route.ts`, `cancel-route.ts`, `session-lock.ts`, `src/server/jobs/cron-auth.ts`, 라우트 `POST /api/v1/orders/{orderId}/cancel`, `GET /api/v1/internal/jobs/expire-orders`. 스키마 변경 없음.
+
+**`expireOrder(orderId)` 상태 전이** — 한 트랜잭션, 잠금 순서 ①주문의 (주체, 회차)를 잠금 없이 읽음(불변) → ②`purchase_quotas FOR UPDATE` → ③`orders FOR UPDATE` 후 재확인 → ④`payments FOR UPDATE` → ⑥`seat_holds` UPDATE.
+
+| 재확인 결과 | 동작 |
+|---|---|
+| 주문 없음 / `PENDING` 아님 | 아무것도 하지 않음(`not_found` / `not_pending`) — `PAYMENT_CONFIRMING`·`PAYMENT_UNKNOWN`·`REVIEW_REQUIRED`는 시각과 무관하게 손대지 않음 |
+| `PENDING`, `hold_expires_at > now()` | 아무것도 하지 않음(`not_due`) |
+| `PENDING`인데 결제가 `CONFIRMING`·`UNKNOWN`·`SUCCEEDED`이거나 hold가 `CONFIRMING` | 모순 상태 — 손대지 않고 보고(`needs_review`, 로그) |
+| `PENDING`, 만료 | `READY` 결제 → `CANCELED`(+`payment_status_logs`, source `SYSTEM`), `ACTIVE` hold → `EXPIRED`(`ended_at`), `counted_seats -= 실제로 끝낸 hold 수`, 주문 → `EXPIRED`(`closed_at`), `order_status_logs`(source `EXPIRY_JOB`/`SYSTEM`/`API`), outbox `ORDER_EXPIRED`(다음 version) |
+
+`READY` 결제 취소는 §11.4·§12.2의 기존 계약이다: 서버 confirm 전이므로 결제가 발생하지 않는다(A-001, 토스는 인증 후 10분 내 승인 미호출 시 만료). 외부 호출은 없다. 좌석 행(`session_seats`)은 바뀌지 않는다(점유 종료 = hold가 live에서 빠짐). 같은 주문에 두 번 이상·동시에 실행해도 두 번째는 `PENDING`이 아니므로 카운터는 한 번만 줄어든다.
+
+**사전 정리(§11.2)** — 주문 생성 메인 트랜잭션 전에, 유효한 BOOKING 세션이 있는 요청에서만: 읽기 전용 조회로 (a) 같은 주체·회차의 만료된 `PENDING` 주문, (b) 요청 좌석에 `ACTIVE` hold를 가진 만료된 `PENDING` 주문을 찾아(주문 ID 정렬, 최대 20건) 각각 `expireOrder`(source `SYSTEM`, 자기 트랜잭션)로 끝낸다. 실패는 로그 후 건너뛰며, 메인 트랜잭션은 정리를 믿지 않고 좌석·활성 주문을 잠금 후 다시 확인한다(정리 실패 시에도 여전히 보수적으로 거부).
+
+**정기 작업** — 읽기 전용 후보 조회(`PENDING` ∧ `hold_expires_at <= now()`, 오래된 순, 배치 1~500, 기본 100, 잠금 없음 → 쿼터 → 주문 순서 역전 불가, `SKIP LOCKED` 불필요) 후 주문마다 `expireOrder`(source `EXPIRY_JOB`). 주문별 오류 격리·집계, 실패 주문은 다음 실행에서 다시 대상. 로그는 건수·주문 ID·오류 코드만. 인증: `Authorization: Bearer <CRON_SECRET>`(Vercel Cron 방식, 32자 이상, 다이제스트 상수 시간 비교), 불일치 401, 비밀값 없음 503(실행하지 않음). 실행 주기·필수화는 Q-038.
+
+**취소(§11.5)** — 한 트랜잭션: 이 브라우저의 BOOKING 세션 행 → 쿼터 → 주문 → 결제 → hold(주문 생성과 같은 순서). 주체가 다르면 404. `PENDING`(미만료) → `CANCELED`(hold `RELEASED`/`USER_CANCELED`, `READY` 결제 `CANCELED`, 로그 source `API`, outbox `ORDER_CANCELED`), `PENDING`(만료) → `EXPIRED`, `CANCELED`/`EXPIRED` → 멱등 200(쓰기 없음), `PAYMENT_CONFIRMING`/`PAYMENT_UNKNOWN`/`REVIEW_REQUIRED`·모순 상태 → 409 `PAYMENT_IN_PROGRESS`, `PAID`/`UNFULFILLED`/`REFUNDED` → 409 `INVALID_STATE_TRANSITION`(환불은 Step 8 관리자 절차, PG 호출·환불 완료 표시 없음). 접근 세션은 유지한다(Q-037).
+
+**재예매** — 취소(커밋) 후 새 `Idempotency-Key`로 새 `POST /orders`. 두 트랜잭션은 독립이며 재예매 실패가 이전 주문을 되살리지 않는다(취소 응답의 `status`가 사실). 원래 키로 다시 보내면 원래 주문의 생성 응답 snapshot이 재반환된다(멱등성, TEST CN-12).
