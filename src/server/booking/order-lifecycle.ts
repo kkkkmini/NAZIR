@@ -22,6 +22,8 @@
  * canceled READY payment, outbox event ORDER_EXPIRED / ORDER_CANCELED (next aggregate version). All or nothing.
  */
 import type { SqlExecutor } from "../db/sql";
+import { AppError } from "../lib/errors";
+import { lockBookingSession } from "./session-lock";
 import { runBookingTx, type BookingTxDeps } from "./tx";
 
 export type OrderEndSource = "API" | "EXPIRY_JOB" | "SYSTEM";
@@ -140,4 +142,39 @@ export async function expireOrder(deps: BookingTxDeps, orderId: string, source: 
   const outcome = await runBookingTx(deps, { name: "order.expire", fn: (tx) => expireInTx(tx, orderId, source) });
   if (outcome.kind === "needs_review") console.error(`[order-expire] order left untouched: ${outcome.reason} order=${orderId}`);
   return outcome;
+}
+
+/**
+ * cancelOrder (§11.5, API §4.5). ONE transaction: the BOOKING session row of this browser (as order creation), then
+ * quota → order → payments → holds. The session's subject must own the order.
+ *   PENDING, hold not expired  → CANCELED (holds RELEASED / USER_CANCELED, READY payment CANCELED)
+ *   PENDING, hold expired      → EXPIRED (the order already ran out: it is ended as an expiry, not a cancellation)
+ *   CANCELED / EXPIRED         → idempotent success with the current state (nothing written)
+ *   PAYMENT_CONFIRMING / PAYMENT_UNKNOWN / REVIEW_REQUIRED, or an inconsistent PENDING → 409 PAYMENT_IN_PROGRESS
+ *   PAID / UNFULFILLED / REFUNDED → 409 INVALID_STATE_TRANSITION (refunds are an admin procedure, Step 8)
+ *   not this subject's order   → 404 NOT_FOUND (existence is not revealed); LOOKUP session → 403
+ */
+export async function cancelOrder(deps: BookingTxDeps, orderId: string, session: { tokenHash: string; bindingHash: string }): Promise<OrderSummary> {
+  return runBookingTx(deps, {
+    name: "order.cancel",
+    fn: async (tx) => {
+      const s = await lockBookingSession(tx, session.tokenHash, session.bindingHash);
+      if (s.purpose !== "BOOKING") throw new AppError("SESSION_PURPOSE_MISMATCH", "예매용 본인인증이 필요합니다.");
+      const o = await lockOrder(tx, orderId);
+      if (!o || o.identity_subject_id !== s.identity_subject_id) throw new AppError("NOT_FOUND", "주문을 찾을 수 없습니다.");
+      const summary = (status: string): OrderSummary => ({ orderId, orderNumber: o.order_number, status });
+      if (o.status === "CANCELED" || o.status === "EXPIRED") return summary(o.status);
+      if (o.status === "PAYMENT_CONFIRMING" || o.status === "PAYMENT_UNKNOWN" || o.status === "REVIEW_REQUIRED")
+        throw new AppError("PAYMENT_IN_PROGRESS", "결제 확인 중인 주문은 취소할 수 없습니다.");
+      if (o.status !== "PENDING") throw new AppError("INVALID_STATE_TRANSITION", "이 주문은 취소할 수 없습니다. 환불은 고객센터로 문의해 주세요.");
+      const p = await lockPayments(tx, orderId);
+      if ("blocked" in p) {
+        console.error(`[order-cancel] order left untouched: ${p.blocked} order=${orderId}`);
+        throw new AppError("PAYMENT_IN_PROGRESS", "결제 확인 중인 주문은 취소할 수 없습니다.");
+      }
+      const to = o.due ? "EXPIRED" : "CANCELED";
+      await endPending(tx, orderId, o, p.ready, to, "API");
+      return summary(to);
+    },
+  });
 }

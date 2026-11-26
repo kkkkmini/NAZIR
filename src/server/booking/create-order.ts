@@ -37,6 +37,7 @@ import type { Keyring } from "../lib/secrets";
 import { acquireIdempotency, completeIdempotency, idempotencyOwnerHash, requestHash } from "./idempotency";
 import { ensureAndLockQuota, lockSeatsSorted } from "./locks";
 import { expireOrder } from "./order-lifecycle";
+import { lockBookingSession } from "./session-lock";
 import { nextOrderNumber } from "./order-number";
 import { runBookingTx, type BookingTxDeps, type ConstraintRules } from "./tx";
 
@@ -136,31 +137,6 @@ const RULES: ConstraintRules = {
 
 function seatUnavailable(ids: string[]): AppError {
   return new AppError("SEAT_UNAVAILABLE", "선택한 좌석 중 예약할 수 없는 좌석이 있습니다.", { unavailableSeatIds: ids });
-}
-
-interface SessionRow {
-  id: string;
-  purpose: string;
-  identity_subject_id: string;
-  identity_verification_id: string;
-  remaining_ms: unknown;
-}
-
-async function lockBookingSession(tx: SqlExecutor, tokenHash: string, bindingHash: string): Promise<SessionRow> {
-  const rows = await tx<SessionRow>(
-    `UPDATE "identity_sessions" SET "last_used_at" = now(), "updated_at" = now()
-      WHERE "token_hash" = $1 AND "browser_binding_hash" = $2 AND "status" = 'ACTIVE' AND "expires_at" > now()
-      RETURNING "id", "purpose", "identity_subject_id", "identity_verification_id",
-                floor(extract(epoch FROM ("expires_at" - now())) * 1000)::bigint AS "remaining_ms"`,
-    [tokenHash, bindingHash],
-  );
-  if (rows.length === 1) return rows[0];
-  const copied = await tx<{ n: number }>(
-    `SELECT count(*)::int AS "n" FROM "identity_sessions" WHERE "token_hash" = $1 AND "status" = 'ACTIVE' AND "expires_at" > now()`,
-    [tokenHash],
-  );
-  if (Number(copied[0]?.n) > 0) throw new AppError("BROWSER_BINDING_MISMATCH", "인증을 시작한 브라우저에서만 진행할 수 있습니다.");
-  throw new AppError("IDENTITY_SESSION_REQUIRED", "본인인증이 필요합니다.");
 }
 
 async function enforceOrderRateLimits(tx: SqlExecutor, deps: CreateOrderDeps, sessionId: string, subjectId: string, showSessionId: string) {
