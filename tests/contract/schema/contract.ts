@@ -11,7 +11,9 @@ import {
   IMMUTABLE_TRIGGERS,
   NON_UUID_ID_COLUMNS,
   PARTIAL_UNIQUES,
+  SEQUENCES,
   SMALLINT_COLUMNS,
+  SQL_FUNCTIONS,
   TABLES,
   UNIQUES,
 } from "./manifest";
@@ -305,6 +307,48 @@ export async function checkConstraintTriggers(db: Queryable): Promise<string[]> 
   return out;
 }
 
+/** Q-025: listed sequences exist with exactly the listed properties (type, step, bounds, NO CYCLE, cache). */
+export async function checkSequences(db: Queryable): Promise<string[]> {
+  const { rows } = await db.query<{ name: string; data_type: string; increment_by: string; min_value: string; start_value: string; cycle: boolean; cache_size: string }>(`
+    SELECT sequencename::text AS name, data_type::text AS data_type, increment_by::text, min_value::text, start_value::text, cycle, cache_size::text
+      FROM pg_sequences WHERE schemaname = 'public'`);
+  const out: string[] = [];
+  for (const spec of SEQUENCES) {
+    const r = rows.find((x) => x.name === spec.name);
+    if (!r) {
+      out.push(`missing sequence ${spec.name}`);
+      continue;
+    }
+    const got = { dataType: r.data_type, increment: Number(r.increment_by), min: Number(r.min_value), start: Number(r.start_value), cycle: r.cycle, cache: Number(r.cache_size) };
+    for (const k of Object.keys(got) as (keyof typeof got)[]) {
+      if (got[k] !== spec[k]) out.push(`sequence ${spec.name}: ${k}=${String(got[k])}, expected ${String(spec[k])}`);
+    }
+  }
+  return out;
+}
+
+/** Q-025: listed SQL functions exist with the listed signature, result type, volatility and security mode. */
+export async function checkSqlFunctions(db: Queryable): Promise<string[]> {
+  const { rows } = await db.query<{ name: string; args: string; returns: string; volatility: string; secdef: boolean }>(`
+    SELECT p.proname::text AS name, pg_get_function_arguments(p.oid) AS args, pg_get_function_result(p.oid) AS returns,
+           p.provolatile::text AS volatility, p.prosecdef AS secdef
+      FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public'`);
+  const out: string[] = [];
+  for (const spec of SQL_FUNCTIONS) {
+    const found = rows.filter((r) => r.name === spec.name);
+    if (found.length !== 1) {
+      out.push(found.length === 0 ? `missing function ${spec.name}` : `function ${spec.name}: ${found.length} overloads, expected exactly 1`);
+      continue;
+    }
+    const r = found[0];
+    if (r.args !== spec.args) out.push(`function ${spec.name}: arguments "${r.args}", expected "${spec.args}"`);
+    if (r.returns !== spec.returns) out.push(`function ${spec.name}: returns ${r.returns}, expected ${spec.returns}`);
+    if (r.volatility !== spec.volatility) out.push(`function ${spec.name}: volatility ${r.volatility}, expected ${spec.volatility}`);
+    if (r.secdef !== spec.securityDefiner) out.push(`function ${spec.name}: SECURITY DEFINER=${r.secdef}, expected ${spec.securityDefiner}`);
+  }
+  return out;
+}
+
 /** Everything in one list (used for the "after all migrations" gate and by MIG-06's dynamic layer). */
 export async function checkAll(db: Queryable): Promise<string[]> {
   return [
@@ -316,6 +360,8 @@ export async function checkAll(db: Queryable): Promise<string[]> {
     ...(await checkTypes(db)),
     ...(await checkImmutableTrigger(db)),
     ...(await checkConstraintTriggers(db)),
+    ...(await checkSequences(db)),
+    ...(await checkSqlFunctions(db)),
   ];
 }
 
@@ -339,6 +385,8 @@ export function protectedObjects() {
     names.add(t.name);
     names.add(t.function);
   }
+  for (const s of SEQUENCES) names.add(s.name);
+  for (const f of SQL_FUNCTIONS) names.add(f.name);
 
   const tables = new Set<string>(TABLES);
   const columns = new Set<string>();
@@ -371,7 +419,7 @@ export function findProtectedDrops(file: string, sql: string): DropFinding[] {
     }
   };
 
-  for (const kw of ["INDEX", "TRIGGER", "FUNCTION"]) {
+  for (const kw of ["INDEX", "TRIGGER", "FUNCTION", "SEQUENCE"]) {
     scan(new RegExp(String.raw`DROP\s+${kw}\s+${ifx}${ident}`, "gi"), (m) =>
       names.has(m[1]) ? `drops contract object ${m[1]}` : null,
     );

@@ -285,7 +285,7 @@ SVG는 시각적 배치만 담당하며 판매 상태는 DB에서 조회한다. 
 | 컬럼 | 타입 | 제약 / 설명 |
 |---|---|---|
 | `id` | uuid | PK |
-| `order_number` | varchar(40) | UNIQUE, NOT NULL, 예: `NZ-202611-000001` (DB sequence 기반 생성) |
+| `order_number` | varchar(40) | UNIQUE, NOT NULL, `CHECK (order_number ~ '^NZ-[0-9]{6}-[0-9]{6,}$')`, 예: `NZ-202611-000001`. `next_order_number()`가 발급(KST 월 + 전역 sequence, §19.15) [확정 Q-025]. 사람이 부르는 참조값이며 비밀값·접근 수단이 아니다 |
 | `show_session_id` | uuid | FK → `show_sessions.id`, NOT NULL |
 | `identity_subject_id` | uuid | FK → `identity_subjects.id`, NOT NULL |
 | `identity_session_id` | uuid | NOT NULL, 주문 생성에 사용된 인증 세션 |
@@ -1239,6 +1239,7 @@ PG는 서버 승인(confirm)형을 전제로 한다[외부 확인 E-002]. PG con
 | 세션이 `CONSUMED` 아닌 인증을 가리킴 / `CONSUMED` 인증에 세션 없음 | 지연 constraint trigger 2개(`identity_sessions_claim_guard`, `identity_verifications_claim_guard`, 커밋 시점) [A-040] |
 | 주문 항목 변경·삭제 | `order_items` UPDATE/DELETE 차단 트리거 |
 | 상태 이력 변경·삭제, hold 물리 삭제 | `order_status_logs`·`seat_status_logs` UPDATE/DELETE 차단, `seat_holds` DELETE 차단(23001) [A-053 ⑦] |
+| 주문번호 형식 위반 / 중복 | `orders_order_number_format_ck` CHECK + `orders_order_number_uq` UNIQUE, 발급은 전역 `order_number_seq`(NO CYCLE) [Q-025, §19.15] |
 | 결제 행 삭제, 승인 금액·승인 시각 없는 `SUCCEEDED` | `payments` DELETE 차단 트리거, `SUCCEEDED` 승인 금액·승인 시각 CHECK [A-038] |
 | 감사·결제 상태 로그·환불 항목의 수정·삭제, 환불 행 삭제 | `admin_audit_logs`·`payment_status_logs`·`refund_items` UPDATE/DELETE 차단 트리거, `refunds` DELETE 차단 트리거 [A-041] |
 | 승인된 결제의 승인 증거 수정·강등 | `payments` 승인 증거 불변 트리거(`SUCCEEDED` 이후 `approved_amount`·`approved_at`·수단·PG 거래 식별값·`status` 등) [A-042] |
@@ -1385,7 +1386,8 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.8 | 2026-11-20 | Step 3: `timestamptz` 세션 시간대 해석 문제(S11) 실측(§19.5)과 앱·트랜잭션·seed 연결의 `TimeZone=UTC` 고정(§19.12). 스키마·migration·seed 데이터 변경 없음 |
 | 1.2.9 | 2026-11-21 | Neon Pooled(`DATABASE_URL`)/Direct(`DATABASE_URL_UNPOOLED`) 연결 분리와 쌍 검증(§19.12). 스키마·migration 변경 없음 |
 | 1.2.10 | 2026-11-25 | §19.11 COMMIT 시점 오류 설명 정정(제약 이름 없음, 실측), §19.13 Step 5 예약 트랜잭션 기반(러너·잠금 헬퍼·오류 분류·Pool 설정) 추가. 스키마·migration 변경 없음 |
-| 1.2.11 | 2026-11-28 | §19.14 S2 좌석·hold 불변조건 트리거와 A-041 확장(상태 이력 append-only, hold DELETE 차단), §13.3·§19.8 갱신. migration `20261128120000_seat_hold_invariants` |
+| 1.2.11 | 2026-11-25 | §19.14 S2 좌석·hold 불변조건 트리거와 A-041 확장(상태 이력 append-only, hold DELETE 차단), §13.3·§19.8 갱신. migration `20261128120000_seat_hold_invariants` |
+| 1.2.12 | 2026-11-26 | §19.15 주문번호 sequence·`next_order_number()`·형식 CHECK(Q-025), §5.1·§13.3 갱신. 1.2.11의 날짜 표기 정정(11-28 → 11-25) |
 
 ---
 
@@ -1514,7 +1516,7 @@ D1~D8은 §19 초안에서 구현자가 고른 사항이었고, 사용자가 아
 | Q-022 | **해결** — `method_type`에 `OTHER` 추가, 승인된 허용 외 결제는 `SUCCEEDED`+`EXCESS`로만 기록(A-034) | §7.1, `payments_method_type_ck`·`payments_method_type_other_ck` |
 | Q-023 | **해결** — UPDATE와 DELETE 모두 차단(A-036) | §5.2, 트리거 2개 |
 | Q-024 | **해결** — 복합 FK로 DB 강제(A-035), 후속으로 브라우저 바인딩까지 확장(A-040) | §6.2·§6.3, `identity_sessions_verification_claim_fk` |
-| Q-025 | **방향 승인**(전역 sequence), 형식·세부는 Step 5 시작 전 확정 | 미구현(D8) |
+| Q-025 | **방향 승인**(전역 sequence), 형식·세부는 Step 5 시작 전 확정 | **확정·구현(2026-11-26, A-053 ②, §19.15)** |
 | Q-026 | **결정**: 현행 유지(D3) | §19.5 |
 | S3 | **해결** — 결제·주문 정합성을 DB가 보장(A-032) | §5.1·§7.1, `payments_primary_order_uq`·`payments_primary_amount_ck`·`payments_order_total_fk`·지연 trigger 2개 |
 | S4 | **해결** — 주문이 쿼터 행을 반드시 가짐(A-033) | §5.1·§5.7, `orders_quota_fk` |
@@ -1535,8 +1537,8 @@ D1~D8은 §19 초안에서 구현자가 고른 사항이었고, 사용자가 아
 - `refund_items.amount ≤ order_items.price`와 항목당 환불 1건(§7.5)은 교차 행 규칙이라 환불 트랜잭션이 검증한다. `refunds.total_amount = SUM(refund_items.amount)`(`SEAT`)와 `PAYMENT_EXCESS` 항목 없음은 DB가 COMMIT에서 검사한다(A-042) — 환불 서비스는 커밋 실패(`23514`, `refunds_seat_items_total_ck`)를 도메인 오류로 변환해야 한다.
 - `orders.total_amount = SUM(order_items.price)`와 항목 수 1~`max_seats_per_identity`는 DB가 검사하지 않는다. 결제 금액 보장(S3)은 `total_amount`가 올바르다는 전제 위에 있으므로 주문 생성 트랜잭션과 INV 테스트가 책임진다.
 - `purchase_quotas.counted_seats`가 §5.7 규칙의 파생값과 일치하는지(`QUOTA_MISMATCH` 감시)는 정기 검사.
-- **좌석 SOLD ↔ live hold(S2)는 2026-11-28부터 DB가 막는다**(§19.14, A-053 ③). 서비스의 `lockSeatsSorted` + `AVAILABLE` 확인은 그대로 1차 방어이자 올바른 오류(`SEAT_UNAVAILABLE`)·잠금 순서를 위한 것이고, 트리거는 우회 경로·버그·동시 변경에 대한 최종 방어다. **종료 주문의 hold, 미판매 좌석의 티켓**(S5)은 여전히 DB가 막지 않는다(Step 9).
-- **보호하지 않은 원장성 테이블**(A-041의 한정 범위, 2026-11-28 A-053 ⑦로 `order_status_logs`·`seat_status_logs`의 UPDATE/DELETE와 `seat_holds`의 DELETE를 추가 차단): `tickets`·`payment_webhook_events`는 아직 삭제·수정할 수 있고, `seat_holds`는 상태 전이를 위해 UPDATE할 수 있으며, `orders`는 삭제할 수 있다(자식 행이 없는 경우). 각각 보존 정책(Q-016)·운영 절차(상태 전이·재처리)와 얽혀 있어 이번 범위에서 제외했다. 결정은 해당 테이블의 서비스가 구현되는 Step에서 한다.
+- **좌석 SOLD ↔ live hold(S2)는 2026-11-25부터 DB가 막는다**(§19.14, A-053 ③). 서비스의 `lockSeatsSorted` + `AVAILABLE` 확인은 그대로 1차 방어이자 올바른 오류(`SEAT_UNAVAILABLE`)·잠금 순서를 위한 것이고, 트리거는 우회 경로·버그·동시 변경에 대한 최종 방어다. **종료 주문의 hold, 미판매 좌석의 티켓**(S5)은 여전히 DB가 막지 않는다(Step 9).
+- **보호하지 않은 원장성 테이블**(A-041의 한정 범위, 2026-11-25 A-053 ⑦로 `order_status_logs`·`seat_status_logs`의 UPDATE/DELETE와 `seat_holds`의 DELETE를 추가 차단): `tickets`·`payment_webhook_events`는 아직 삭제·수정할 수 있고, `seat_holds`는 상태 전이를 위해 UPDATE할 수 있으며, `orders`는 삭제할 수 있다(자식 행이 없는 경우). 각각 보존 정책(Q-016)·운영 절차(상태 전이·재처리)와 얽혀 있어 이번 범위에서 제외했다. 결정은 해당 테이블의 서비스가 구현되는 Step에서 한다.
 - 승인 증거는 `SUCCEEDED` 이후 DB가 불변으로 지킨다(A-042). 따라서 **승인 값을 잘못 기록했을 때 UPDATE로 고칠 수 없다**: 승인 시 한 번에 올바른 값을 쓰는 것이 서비스의 의무이고, 정정은 별도 정정 절차(감사 로그 §9.3 + 관리자 전용 migration 권한)로만 한다. 이 절차는 Step 8에서 설계한다.
 - **인증 claim의 시간 정책**: `claim_expires_at`·`expires_at` 판단은 서비스가 Clock으로 한다. DB는 시간에 따른 상태 변경을 하지 않는다(지연 트리거는 상태 관계만 검사한다).
 - **원문 라벨의 의미 검증**: `provider_method_raw` CHECK는 9자리 이상 숫자·`@`·제어문자 같은 명백한 위험만 막는다. 라벨이 PG가 실제로 보낸 값인지, 마스킹이 충분한지는 adapter와 서비스 책임이다.
@@ -1636,9 +1638,9 @@ npm run test:db
 - **Prisma `timeout`은 실행 중인 문장을 멈추지 않는다**(1초 문장이 끝난 뒤 COMMIT에서 실패). 그래서 `statement_timeout < transaction timeout`, `lock_timeout < statement_timeout`을 설정 규칙으로 강제한다.
 - **Pool 설정** `src/server/config/db-pool-config.ts`(M8): `NAZIR_DB_POOL_MAX`·`_CONNECTION_TIMEOUT_MS`·`_IDLE_TIMEOUT_MS`·`_TX_MAX_WAIT_MS`·`_TX_TIMEOUT_MS`·`_STATEMENT_TIMEOUT_MS`·`_LOCK_TIMEOUT_MS`. local/test 개발 기본값(5 / 5000 / 10000 / 2000 / 10000 / 5000 / 2000), staging/production은 전부 필수(누락 시 기동 거부, 요청 시점에도 fail-closed). 운영 수치는 **미확정**: Neon pooled 연결 한도와 Vercel 최대 인스턴스 수(E-007)를 받은 뒤 `인스턴스 수 × NAZIR_DB_POOL_MAX < 한도`로 정한다. 그 전에는 Production 준비 완료로 표시하지 않는다.
 - **로그**: 트랜잭션 이름·분류·SQLSTATE·제약 이름·시도 횟수만. 메시지·파라미터는 기록하지 않는다(TX-11: 고객 이름·전화번호가 든 CHECK 오류에서 확인).
-- **남은 일**: S2 교차 불변조건·A-041 로그 보호 migration(→ §19.14 완료), Q-025 sequence, 주문 생성 API는 별도 단위. Neon pooler(트랜잭션 모드)에서 `set_config(…, true)`·`FOR UPDATE`·지연 trigger 동작은 미검증(§19.10-5).
+- **남은 일**: S2 교차 불변조건·A-041 로그 보호 migration(→ §19.14 완료), Q-025 sequence(→ §19.15 완료), 주문 생성 API는 별도 단위. Neon pooler(트랜잭션 모드)에서 `set_config(…, true)`·`FOR UPDATE`·지연 trigger 동작은 미검증(§19.10-5).
 
-### 19.14 Step 5 단위 2: 좌석·hold 불변조건(S2)과 이력 보호(A-041 확장) (2026-11-28, A-053 ③ ⑦)
+### 19.14 Step 5 단위 2: 좌석·hold 불변조건(S2)과 이력 보호(A-041 확장) (2026-11-25, A-053 ③ ⑦)
 
 migration `20261128120000_seat_hold_invariants`(raw SQL, `BEGIN; … COMMIT;`). Prisma schema 변경 없음(트리거·함수는 schema.prisma에 표현되지 않음, A-019). 기존 함수·트리거와 이름 충돌 없음(새 함수 2개, 새 트리거 7개, 기존 `ledger_reject_update/delete` 재사용).
 
@@ -1671,3 +1673,23 @@ migration `20261128120000_seat_hold_invariants`(raw SQL, `BEGIN; … COMMIT;`). 
 **보호 범위 밖(관리 작업)**: `TRUNCATE`(트리거가 실행되지 않음), 테이블 소유자·슈퍼유저의 `ALTER TABLE … DISABLE TRIGGER`·`session_replication_role = replica`, 함수 교체(`CREATE OR REPLACE FUNCTION`). 앱 DB 역할에서 이 권한을 빼는 것은 Step 10(S9, 역할 분리)이다. 일반 애플리케이션 경로(INSERT/UPDATE/DELETE)는 위 트리거가 모두 막는다.
 
 **테스트**: `tests/contract/schema/seat-hold-invariants.test.ts` 28개(S2-01~15, A41-01~07, 변이 S2-M1~M4·A41-M1). 동시성: 보유 측 선점·판매 측 선점·선점 측 롤백, 동시 시작 30회(양방향 승리를 단언), REPEATABLE READ 판매자, 정렬 잠금 다중 좌석 8건 동시 — 모두 실제 PostgreSQL 16 + Prisma adapter.
+
+### 19.15 Step 5 단위 3: 주문번호 sequence (2026-11-26, Q-025, A-053 ②)
+
+migration `20261129120000_order_number_sequence`(raw SQL, `BEGIN; … COMMIT;`, Prisma schema 변경 없음).
+
+| 객체 | 정의 |
+|---|---|
+| `order_number_seq` | `AS bigint INCREMENT BY 1 MINVALUE 1 NO MAXVALUE START WITH 1 CACHE 1 NO CYCLE`. 전역 1개, 월별 초기화 없음 |
+| `next_order_number("at" timestamptz DEFAULT now()) RETURNS varchar(40)` | plpgsql, VOLATILE, SECURITY INVOKER. `'NZ-' ‖ to_char("at" AT TIME ZONE 'Asia/Seoul', 'YYYYMM') ‖ '-' ‖ 번호`. 번호는 `nextval`의 10진 문자열이며 **6자리 미만일 때만** `lpad(…, 6, '0')`(`lpad`는 더 긴 값을 잘라내므로 7자리 이상에는 쓰지 않는다). `at`이 NULL이면 22004 |
+| `orders_order_number_format_ck` | `CHECK (order_number ~ '^NZ-[0-9]{6}-[0-9]{6,}$')` |
+
+- **월**: 주어진 순간을 `Asia/Seoul` 현지 시각으로 바꾼 뒤의 연월. 세션 `TimeZone`과 무관하다(앱은 UTC로 고정). 예: `2026-11-30T15:00:00Z` = KST 12월 1일 0시 → `202612`.
+- **기본 순간 `now()`** = 트랜잭션 시작 시각 = 주문 행 `created_at` 기본값. 따라서 번호의 월은 주문 생성의 KST 월과 같다.
+- **결번 허용**: `nextval`은 롤백되지 않는다. 롤백된 주문의 번호는 다시 발급되지 않는다.
+- **자릿수**: 최대 19자리(bigint 최대) → 전체 최대 29자로 `varchar(40)` 안이다. 최대값에 도달하면 NO CYCLE이라 2200H로 실패한다(1로 돌아가지 않음).
+- **기존 데이터**: migration이 형식에 맞지 않는 기존 주문 수를 세고, 1건이라도 있으면 **번호를 바꾸지 않고** migration 전체를 실패시킨다. 개발·테스트 fixture는 `testOrderNumber()`(달 `999912`, 실제 sequence 미사용)로 바꿨다.
+- **권한**: 함수 EXECUTE는 PostgreSQL 기본값으로 PUBLIC. SECURITY INVOKER라 호출 역할은 `order_number_seq`의 USAGE(또는 UPDATE)가 필요하다. 현재 앱은 소유자 역할로 접속한다. Step 10 역할 분리(S9) 때 앱 역할에 `GRANT USAGE ON SEQUENCE order_number_seq`가 필요하다(ON-10으로 확인).
+- **앱**: `src/server/booking/order-number.ts` `nextOrderNumber(tx)` — `runBookingTx`가 넘긴 같은 트랜잭션 executor로 `SELECT next_order_number()` 한 문장을 실행한다(별도 트랜잭션 없음). 결과 형식을 한 번 더 검사한다. 주문 INSERT는 같은 트랜잭션에서 이 값을 쓴다.
+- **보안**: 번호는 순차적이라 추측할 수 있고 판매량 추정에 쓰일 수 있다. 접근 권한 판단에는 절대 쓰지 않는다(ORD-11). 주문 조회는 항상 소유자 세션·접근 세션으로 한다.
+- **계약**: `manifest.ts`의 `SEQUENCES`·`SQL_FUNCTIONS`·`CHECKS`, `contract.ts`의 `checkSequences`·`checkSqlFunctions`(`checkAll`에 포함). MIG-06 정적 검사에 `DROP SEQUENCE`를 추가했다. DRIFT-01은 이 객체들의 영향을 받지 않음을 확인했다.

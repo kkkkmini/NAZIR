@@ -3,7 +3,7 @@
  * as a raw-SQL service would. Every builder returns the inserted row; `overrides` use snake_case
  * column names and replace the defaults.
  */
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { expect } from "vitest";
 import type { Queryable } from "../contract";
 
@@ -31,6 +31,13 @@ export async function update(q: Queryable, table: string, id: string, set: Row):
 }
 
 const rnd = () => randomUUID().replace(/-/g, "").slice(0, 12);
+
+/**
+ * A unique order number for fixtures that matches the DB format CHECK (Q-025, `^NZ-[0-9]{6}-[0-9]{6,}$`) without using
+ * the real sequence. The month `999912` is deliberately impossible, so a fixture number can never be mistaken for one
+ * issued by `next_order_number()`.
+ */
+export const testOrderNumber = () => `NZ-999912-${String(randomInt(0, 2 ** 47)).padStart(15, "0")}`;
 const inMinutes = (m: number) => new Date(Date.now() + m * 60_000);
 
 export const mkVenue = (q: Queryable, o: Row = {}) => insert(q, "venues", { name: `venue-${rnd()}`, ...o });
@@ -96,7 +103,7 @@ export async function mkOrder(
 ) {
   await ensureQuota(q, ref.subjectId, ref.sessionId);
   return insert(q, "orders", {
-    order_number: `NZ-T-${rnd()}`,
+    order_number: testOrderNumber(),
     show_session_id: ref.sessionId,
     identity_subject_id: ref.subjectId,
     identity_session_id: ref.identitySessionId,

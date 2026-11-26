@@ -253,6 +253,7 @@ export const CHECKS: CheckSpec[] = [
   { name: "orders_total_amount_ck", table: "orders", columns: ["total_amount"] },
   { name: "orders_paid_requires_confirmed_payment_ck", table: "orders", columns: ["status", "confirmed_payment_id"], rule: "9" },
   { name: "orders_confirm_protected_until_ck", table: "orders", columns: ["status", "confirm_protected_until"], rule: "D-003" },
+  { name: "orders_order_number_format_ck", table: "orders", columns: ["order_number"], rule: "Q-025: NZ-YYYYMM-NNNNNN" },
   { name: "order_items_price_ck", table: "order_items", columns: ["price"] },
   { name: "payments_requested_amount_ck", table: "payments", columns: ["requested_amount"] },
   { name: "payments_approved_amount_ck", table: "payments", columns: ["approved_amount"] },
@@ -388,3 +389,18 @@ export const CONSTRAINT_TRIGGERS = [
   // A-053 ③ S2 guard B: a seat set to SOLD has no live hold at COMMIT. tgtype: ROW(1) | UPDATE(16)
   { name: "session_seats_sold_hold_guard", table: "session_seats", tgtype: 1 | 16, function: "session_seats_check_sold_no_live_hold" },
 ];
+
+// ───────────────────────── sequences and SQL functions (raw SQL, not in schema.prisma) ─────────────────────────
+
+/** Q-025 (A-053 ②): ONE global order number sequence. Exact properties are part of the contract. */
+export const SEQUENCES = [
+  { name: "order_number_seq", dataType: "bigint", increment: 1, min: 1, start: 1, cycle: false, cache: 1 },
+] as const;
+
+/**
+ * Raw-SQL functions that application code calls directly (trigger functions are covered by the trigger lists).
+ * `args` is pg_get_function_arguments(), `returns` is pg_get_function_result(), `volatility` is pg_proc.provolatile.
+ */
+export const SQL_FUNCTIONS = [
+  { name: "next_order_number", args: "at timestamp with time zone DEFAULT now()", returns: "character varying", volatility: "v", securityDefiner: false },
+] as const;

@@ -18,7 +18,7 @@ import { buildPgPoolConfig } from "../../../src/server/db/pg-adapter";
 import { ensureAndLockQuota, lockSeatsSorted } from "../../../src/server/booking/locks";
 import { DEFAULT_RETRY_POLICY, runBookingTx, type BookingTxDeps, type ConstraintRules, type TxLimits, type TxObservation } from "../../../src/server/booking/tx";
 import { AppError } from "../../../src/server/lib/errors";
-import { insert, mkHold, mkIdentitySession, mkOrder, mkOrderItem, mkSubject, mkWorld } from "./helpers/fixtures";
+import { insert, mkHold, mkIdentitySession, mkOrder, mkOrderItem, mkSubject, mkWorld, testOrderNumber } from "./helpers/fixtures";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
 
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -453,7 +453,7 @@ describe("S2 concurrency — hold creation vs SOLD on the same seat (real concur
             const [o] = await tx<{ id: string }>(
               `INSERT INTO orders (order_number, show_session_id, identity_subject_id, identity_session_id, status, customer_name, customer_phone, total_amount, hold_expires_at)
                VALUES ($1, $2::uuid, $3::uuid, $4::uuid, 'PENDING', 'n', 'p', 200000, now() + interval '7 min') RETURNING id`,
-              [`NZ-T-${randomUUID().slice(0, 18)}`, w.s1.id, people[i].s.id, people[i].is.id],
+              [testOrderNumber(), w.s1.id, people[i].s.id, people[i].is.id],
             );
             const locked = await lockSeatsSorted(tx, wanted);
             if (locked.some((s) => s.status !== "AVAILABLE")) throw new AppError("SEAT_UNAVAILABLE", "seat");

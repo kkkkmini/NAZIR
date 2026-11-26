@@ -28,6 +28,7 @@ import {
   PG,
   update,
   confirmOrder,
+  testOrderNumber,
 } from "./helpers/fixtures";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
 
@@ -469,7 +470,7 @@ describe("rule 12 — an order's identity session belongs to the order's subject
         constraint: "orders_identity_session_subject_fk",
       });
       await mkOrder(c, w.ref(w.u1, w.is1)); // control
-      await expectInsertError(c, () => mkOrder(c, w.ref(w.u2, w.is1), { order_number: "NZ-T-other" }), {
+      await expectInsertError(c, () => mkOrder(c, w.ref(w.u2, w.is1), { order_number: testOrderNumber() }), {
         code: PG.foreignKeyViolation,
         constraint: "orders_identity_session_subject_fk",
       });

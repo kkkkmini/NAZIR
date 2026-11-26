@@ -13,7 +13,7 @@ import { buildPgPoolConfig } from "../../../src/server/db/pg-adapter";
 import { ensureAndLockQuota, lockSeatsSorted } from "../../../src/server/booking/locks";
 import { DEFAULT_RETRY_POLICY, runBookingTx, type BookingTxDeps, type ConstraintRules, type RetryPolicy, type TxLimits, type TxObservation } from "../../../src/server/booking/tx";
 import { AppError } from "../../../src/server/lib/errors";
-import { mkOrder, mkOrderItem, mkHold, mkWorld } from "./helpers/fixtures";
+import { mkOrder, mkOrderItem, mkHold, mkWorld, testOrderNumber } from "./helpers/fixtures";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
 
 const server = resolveTestServer();
@@ -251,7 +251,7 @@ describe("TX-06 statement-time 23505 by constraint name", () => {
         await tx(
           `INSERT INTO orders (order_number, show_session_id, identity_subject_id, identity_session_id, status, customer_name, customer_phone, total_amount, hold_expires_at)
            VALUES ($1, $2::uuid, $3::uuid, $4::uuid, 'PENDING', 'n', 'p', 100000, now() + interval '7 min')`,
-          [`NZ-T-${randomUUID().slice(0, 18)}`, w.s1.id, w.u1.id, w.is1.id],
+          [testOrderNumber(), w.s1.id, w.u1.id, w.is1.id],
         );
       },
     }).catch((x) => x);
@@ -265,7 +265,7 @@ describe("TX-06 statement-time 23505 by constraint name", () => {
     const a = await mkOrder(db, w.ref(w.u1, w.is1));
     const ai = await mkOrderItem(db, { orderId: a.id, sessionId: w.s1.id, sessionSeatId: w.s1a.id });
     await mkHold(db, { orderId: a.id, orderItemId: ai.id, sessionSeatId: w.s1a.id });
-    const number = `NZ-T-${randomUUID().slice(0, 18)}`;
+    const number = testOrderNumber();
     const e = await runBookingTx(deps(prisma), {
       name: "tx06b",
       constraints: ORDER_RULES(),
@@ -469,7 +469,7 @@ describe("TX-11 no sensitive data in logs or responses", () => {
       tx(
         `INSERT INTO orders (order_number, show_session_id, identity_subject_id, identity_session_id, status, customer_name, customer_phone, total_amount, hold_expires_at)
          VALUES ($1, $2::uuid, $3::uuid, $4::uuid, 'PENDING', $5, $6, -1, now() + interval '7 min')`,
-        [`NZ-T-${randomUUID().slice(0, 18)}`, w.s1.id, w.u1.id, w.is1.id, NAME, PHONE],
+        [testOrderNumber(), w.s1.id, w.u1.id, w.is1.id, NAME, PHONE],
       );
     await q(`INSERT INTO purchase_quotas (identity_subject_id, show_session_id, seat_limit) VALUES ($1, $2, 4) ON CONFLICT DO NOTHING`, [w.u1.id, w.s1.id]);
     // precondition: the raw error really carries the values (otherwise this test proves nothing)

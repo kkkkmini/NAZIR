@@ -32,6 +32,7 @@ import {
   mkWorld,
   PG,
   update,
+  testOrderNumber,
 } from "./helpers/fixtures";
 import { cloneTestDb, destroyTestDb, resolveTestServer, type TestDb } from "./helpers/pg";
 
@@ -301,12 +302,12 @@ describe("S4 — an order must have its purchase_quotas row", () => {
       const u1s1 = w.ref(w.u1, w.is1, w.s1);
       const fk = { code: PG.foreignKeyViolation, constraint: DB_CONSTRAINT.orderQuotaFk };
 
-      await expectInsertError(c, () => rawOrder(c, u1s1, "NZ-S4-1"), fk); // no row at all
+      await expectInsertError(c, () => rawOrder(c, u1s1, testOrderNumber()), fk); // no row at all
 
       await insert(c, "purchase_quotas", { identity_subject_id: w.u1.id, show_session_id: w.s1.id, seat_limit: 4 });
-      await expectInsertError(c, () => rawOrder(c, w.ref(w.u2, w.is2, w.s1), "NZ-S4-2"), fk); // row exists for u1, not u2
-      await expectInsertError(c, () => rawOrder(c, w.ref(w.u1, w.is1, w.s2), "NZ-S4-3"), fk); // row exists for s1, not s2
-      const ok = await rawOrder(c, u1s1, "NZ-S4-4");
+      await expectInsertError(c, () => rawOrder(c, w.ref(w.u2, w.is2, w.s1), testOrderNumber()), fk); // row exists for u1, not u2
+      await expectInsertError(c, () => rawOrder(c, w.ref(w.u1, w.is1, w.s2), testOrderNumber()), fk); // row exists for s1, not s2
+      const ok = await rawOrder(c, u1s1, testOrderNumber());
       expect(ok.status).toBe("PENDING");
     }));
 
