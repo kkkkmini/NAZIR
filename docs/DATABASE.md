@@ -1388,6 +1388,7 @@ v1.2 처리: Q-004는 D-014로 확정(§5.1 partial unique 조건 확정, `UNFUL
 | 1.2.10 | 2026-11-25 | §19.11 COMMIT 시점 오류 설명 정정(제약 이름 없음, 실측), §19.13 Step 5 예약 트랜잭션 기반(러너·잠금 헬퍼·오류 분류·Pool 설정) 추가. 스키마·migration 변경 없음 |
 | 1.2.11 | 2026-11-25 | §19.14 S2 좌석·hold 불변조건 트리거와 A-041 확장(상태 이력 append-only, hold DELETE 차단), §13.3·§19.8 갱신. migration `20261128120000_seat_hold_invariants` |
 | 1.2.12 | 2026-11-26 | §19.15 주문번호 sequence·`next_order_number()`·형식 CHECK(Q-025), §5.1·§13.3 갱신. 1.2.11의 날짜 표기 정정(11-28 → 11-25) |
+| 1.2.13 | 2026-11-26 | §19.16 주문 생성 트랜잭션·멱등성·접근 세션 갱신·rate limit 순서. 스키마 변경 없음 |
 
 ---
 
@@ -1693,3 +1694,28 @@ migration `20261129120000_order_number_sequence`(raw SQL, `BEGIN; … COMMIT;`, 
 - **앱**: `src/server/booking/order-number.ts` `nextOrderNumber(tx)` — `runBookingTx`가 넘긴 같은 트랜잭션 executor로 `SELECT next_order_number()` 한 문장을 실행한다(별도 트랜잭션 없음). 결과 형식을 한 번 더 검사한다. 주문 INSERT는 같은 트랜잭션에서 이 값을 쓴다.
 - **보안**: 번호는 순차적이라 추측할 수 있고 판매량 추정에 쓰일 수 있다. 접근 권한 판단에는 절대 쓰지 않는다(ORD-11). 주문 조회는 항상 소유자 세션·접근 세션으로 한다.
 - **계약**: `manifest.ts`의 `SEQUENCES`·`SQL_FUNCTIONS`·`CHECKS`, `contract.ts`의 `checkSequences`·`checkSqlFunctions`(`checkAll`에 포함). MIG-06 정적 검사에 `DROP SEQUENCE`를 추가했다. DRIFT-01은 이 객체들의 영향을 받지 않음을 확인했다.
+
+### 19.16 Step 5 단위 4: 주문 생성 API·멱등성 (2026-11-26, A-053 ④⑤⑥)
+
+코드: `src/server/booking/idempotency.ts`, `create-order.ts`, `order-route.ts`, `order-app-deps.ts`, `src/app/api/v1/orders/route.ts`. 스키마 변경 없음.
+
+**한 트랜잭션(READ COMMITTED, `runBookingTx`)의 문장 순서 = 잠금 순서**
+1. `identity_sessions` 행: `UPDATE … SET last_used_at = now()`(행 잠금, 바인딩 일치·ACTIVE·미만료). 이후 이 세션은 "사용됨"이라 claim 응답 유실 복구(A-052) 대상이 아니다.
+2. `idempotency_records`: `INSERT … ON CONFLICT (scope, owner_key_hash, idempotency_key_hash) DO NOTHING`, 충돌이면 그 행 `FOR UPDATE` 후 판정(만료 → 같은 행 재사용, 다른 본문 → 409, COMPLETED → 재반환). **정확한 재요청은 여기서 끝난다**(횟수 제한·쿼터·좌석 잠금 없음).
+3. 잔여 10분(DB 시각).
+4. `rate_limit_counters` 2행(`order.create.session` = 세션 ID, `order.create.subject_session` = 주체 + 회차) — 같은 트랜잭션. 동시 동일 요청은 2단계에서 기다렸다가 재반환하므로 카운터를 두 번 올리지 않는다. 롤백된 요청의 증가는 함께 롤백된다(Q-035).
+5. 판매 조건(§11.11) 조회.
+6. `purchase_quotas` 확보 + `FOR UPDATE`(§13.2 1단계).
+7. 활성 주문 조회(잠금 후 판단). 8. 한도(`counted_seats + n <= seat_limit`).
+9. `session_seats` id 순 `FOR UPDATE`(`lockSeatsSorted`) → 같은 회차·`AVAILABLE`·live hold 없음. **만료 시각이 지났지만 처리되지 않은 `ACTIVE` hold도 좌석을 막는다**(사전 정리 `expireOrder`는 다음 단위; 그 전까지 보수적으로 거부).
+10. 쓰기: 주문번호, `orders`(DB 가격 합계, `hold_expires_at = now() + 7분`, 이름·전화는 인증 행에서 복호화 후 `orders.*` 필드 AAD로 재암호화), `order_items`, `seat_holds(ACTIVE)`(S2 guard A의 좌석 `FOR SHARE`는 이미 잡은 잠금이라 대기 없음), `counted_seats += n`, `order_status_logs`(NULL → PENDING, API), `order_access_sessions`(토큰 hash만, `expires_at = LEAST(COALESCE(ends_at, starts_at) + 24h, now() + 30일)` — Q-034), `outbox_events`(`ORDER_CREATED`, `ORDER`, version 1, 개인정보 없는 payload), `idempotency_records` COMPLETED(최소 응답 snapshot).
+
+어느 단계든 실패하면 위 모든 쓰기·카운터 증가·세션 `last_used_at`이 롤백된다(TEST CO-20·21: 각 쓰기 지점과 COMMIT에서 강제 실패).
+
+**제약 위반 매핑(최종 방어)**: 23505 `seat_holds_active_seat_uq` → 409 `SEAT_UNAVAILABLE`, `orders_active_subject_session_uq` → 409 `ACTIVE_ORDER_EXISTS`. 23514·23001은 이 트랜잭션에서 매핑하지 않는다: 좌석·쿼터를 잠그고 확인한 뒤이므로 CHECK·트리거 위반은 버그다 → 500.
+
+**접근 세션과 응답 유실**: 토큰 원문은 저장하지도 DB로 보내지도 않는다(앱에서 SHA-256 후 전달). 응답이 유실되면 같은 키 재요청이 그 브라우저의 접근 세션 행(`order_id`·바인딩 일치·ACTIVE·미만료)의 `token_hash`만 새 토큰으로 바꾼다(만료 불변, 이전 토큰 무효). claim 복구(A-052)와 달리 "미사용"·"5분" 조건이 없는 이유: 재요청자는 같은 주체·같은 브라우저의 유효한 BOOKING 세션을 이미 갖고 있고, 그 세션 자체가 이 주문을 볼 수 있으므로(§11.10) 새 권한이 생기지 않는다. 한계: 세션·바인딩 쿠키를 함께 탈취한 공격자도 같은 일을 할 수 있다(어차피 그 세션으로 주문을 볼 수 있음). 다른 브라우저(바인딩)는 소유 주체가 달라 재반환받지 못한다.
+
+**멱등성 소유 주체**: 도메인 분리 SHA-256(Q-036, §5.8의 HMAC 문언과 다름). 키 hash도 SHA-256. 원문 키는 저장·로그하지 않는다. 보존 24시간, 경계 `expires_at <= now()`이면 만료.
+
+**동시성 검증(TEST §3.4)**: 같은 키 8건 → 주문 1·재반환 7·정책별 카운터 +1, 다른 주체 8명 같은 좌석 → 1건, 한 주체 5건 → 1건(나머지 `ACTIVE_ORDER_EXISTS`), 겹치는 2석 10건 → deadlock 0·전부 아니면 전무, 쿼터 행 없는 상태의 두 브라우저 동시 주문 → 1건.

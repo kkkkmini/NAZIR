@@ -270,6 +270,15 @@
 }
 ```
 
+**구현(2026-11-26, DATABASE §19.16)**
+- 요청 본문은 정확히 `{sessionId, sessionSeatIds}`(그 밖의 필드·가격 필드는 400). 좌석 1~10개 형식 검사 후 회차 한도(최대 4) 초과는 422. 같은 좌석 중복은 400. 좌석 순서는 의미가 없다(정규화 후 멱등성 비교).
+- `Idempotency-Key`: UUID v4 또는 128bit 이상 base64url(22~128자). 없거나 형식 위반은 400 `IDEMPOTENCY_KEY_INVALID`.
+- 처리 순서와 오류(앞의 검사가 실패하면 뒤는 실행하지 않음): 바인딩 쿠키 401 `BROWSER_BINDING_REQUIRED` → Origin·CSRF 403 `CSRF_REJECTED` → 인증 세션 쿠키 401 `IDENTITY_SESSION_REQUIRED` → 키 400 → 본문 400 → (트랜잭션) 세션 401(`IDENTITY_SESSION_REQUIRED`·`BROWSER_BINDING_MISMATCH`)/403 `SESSION_PURPOSE_MISMATCH` → 멱등성(재반환 / 409 `IDEMPOTENCY_KEY_REUSED` / 409 `REQUEST_IN_PROGRESS`) → 잔여 10분 422 → 주문 생성 횟수 429 `ORDER_CREATION_LIMITED`(+`Retry-After`)·503 `RATE_LIMIT_UNAVAILABLE` → 회차 404 `NOT_FOUND`(없음·비공개)/422 `SALES_NOT_OPEN` → 409 `ACTIVE_ORDER_EXISTS`(`activeOrderId`) → 422 `PURCHASE_LIMIT_EXCEEDED`(`remaining`) → 409 `SEAT_UNAVAILABLE`(`unavailableSeatIds`: 판매·차단·유효 점유·다른 회차·없는 좌석). DB 혼잡은 503 `DATABASE_BUSY`(+`Retry-After`).
+- **정확한 재요청**(같은 소유 주체·같은 키·같은 본문)은 횟수 제한을 소비하지 않고, 잔여 10분·좌석 검사 없이 처음의 201 본문을 그대로 돌려준다. 같은 브라우저의 접근 세션이 유효하면 그 토큰을 새로 바꿔 쿠키로 준다(만료 시각 불변, 이전 토큰 무효). 접근 세션이 폐기·만료됐으면 본문만 준다.
+- 접근 쿠키 이름: `__Host-nz_oa_` + 주문 ID(하이픈 제외) 앞 16자. `Max-Age` = 접근 세션 만료까지(초).
+- `seatLabel`: `{구역} {열}열 {번호}번`(열이 없으면 `{구역} {번호}번`).
+- 가격·총액은 DB의 회차 좌석 가격으로 서버가 계산한다.
+
 `orderNumber`: `NZ-YYYYMM-NNNNNN` — 주문 생성 시각(DB)의 KST 연월 + 전역 일련번호(최소 6자리, 필요하면 더 길어짐, 결번 있음) [확정 Q-025]. 고객 응대용 참조값이며 **비밀값이 아니고 조회·인증 수단으로 쓰이지 않는다**(주문 조회는 세션·접근 세션으로만, ORD-11). 클라이언트는 길이를 고정하지 않는다.
 
 **Idempotency** [채택 A-010 / B5]: 레코드는 (인증 주체 + 브라우저 바인딩) 소유다.
@@ -508,3 +517,4 @@ v1.0의 `/admin/orders/review-required`, `/admin/orders/{id}/resolve`, `/admin/o
 | 1.2.1 | 2026-11-22 | §4.3 Step 3 구현 기록(응답 형식·오류·캐시). 기존 명세는 변경 없음 |
 | 1.2.2 | 2026-11-25 | §2.1 `DATABASE_BUSY`(503) 추가(A-053). 기존 명세는 변경 없음 |
 | 1.2.3 | 2026-11-26 | §4.4 `orderNumber` 형식·의미(Q-025) 명시. 기존 명세는 변경 없음 |
+| 1.2.4 | 2026-11-26 | §4.4 주문 생성 구현 기록(검사 순서·오류·멱등 재요청·접근 쿠키). 기존 명세는 변경 없음 |
