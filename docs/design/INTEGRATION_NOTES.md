@@ -1,6 +1,7 @@
 # 프런트 ↔ 백엔드 통합 준비 기록
 
 > 프런트 브랜치 `claude/amazing-noether-2z1zrh` 기준. 백엔드 브랜치는 병합·복사하지 않고 문서로만 대조한다.
+> 통합 브랜치 `claude/nazir-integration` 기준 갱신 2026-11-27(통합 2단계 반영, 미커밋).
 > 최종 확인 2026-11-24: 백엔드 Step 3 `claude/epic-ptolemy-vy178w` HEAD `b584b4b`(`docs/STEP3_HANDOFF.md`). Step 4 브랜치는 원격에 없음.
 
 ## 1. 데이터 경계
@@ -33,9 +34,9 @@
 
 | 프런트 | 백엔드 Step 3 | 처리 결정 필요 |
 |---|---|---|
-| `src/app/page.tsx`(A1), `layout.tsx`, `globals.css` | 홈(공연 1개/여러 개 분기), `layout.tsx` | 어느 쪽을 기준으로 할지 |
-| `/policies/{terms,privacy,refund,support}` | `/terms`, `/privacy`, `/refund-policy`, `/business-info` | 경로 통일(링크: `site-footer.tsx`) |
-| `src/components/site/*`(header/footer) | `SiteChrome.tsx`, `PolicyPage.tsx`, `business-info.ts` | 공통 셸 하나로 |
+| `src/app/page.tsx`(A1), `layout.tsx`, `globals.css` | 홈(공연 1개/여러 개 분기), `layout.tsx` | **해결(통합 1단계 `1e71ef5`):** 프런트 A1·화이트 레이아웃 유지, 백엔드 홈 데이터 로딩은 `src/app/_catalog/content.tsx`에 보존(API 연결 단계에서 사용) |
+| `/policies/{terms,privacy,refund,support}` | `/terms`, `/privacy`, `/refund-policy`, `/business-info` | **해결(통합 2단계, 미커밋):** 백엔드 경로 사용, `/policies/{terms,privacy,refund}` 삭제 후 `next.config.ts` 임시 리다이렉트(307). `/policies/support`(고객 문의)는 백엔드 대응 화면이 없어 유지(U4 결정 시 경로 재검토). 푸터·A3-4 환불 규정 링크 교체 |
+| `src/components/site/*`(header/footer) | `SiteChrome.tsx`, `PolicyPage.tsx`, `business-info.ts` | **해결(통합 2단계, 미커밋):** 공통 셸 `site-shell.tsx`(프런트 헤더·푸터, 화이트). `SiteChrome.tsx` 삭제, `PolicyPage`·사업자 정보·404·오류 화면은 셸 안에서 화이트로 표시. 사업자 정보는 `business-info.ts` 하나만 사용. `/shows`·`/identity/mock`은 라우트 layout으로 셸 적용, `/shows`의 판매 준비 중 안내(기존 PreLaunchNotice 조건·문구) 유지 |
 | `/booking?…`(A3-1), `/booking/seats?session=`(A3-3) | `/shows/[slug]`, `/shows/[slug]/sessions/[sessionId]`(읽기 전용) | 예매 경로 체계 |
 | `src/components/seats/*` | `src/components/seat-map/*` | 배치도 컴포넌트 하나로 |
 | `src/server/dev/*`, `devPreviewEnabled` | `error.tsx`, `not-found.tsx`, DbClock | 프런트 브랜치는 Step 1 기준 — main(Step 2) 미병합 |

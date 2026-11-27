@@ -1,5 +1,7 @@
 "use client";
 
+import { PageTitle, SiteShell } from "@/components/site/site-shell";
+
 /**
  * IA A6: a failure while loading (e.g. the database is unreachable). Never shows internal error text.
  *
@@ -9,12 +11,18 @@
  */
 export default function Error({ retry }: { error: unknown; retry: () => void }) {
   return (
-    <>
-      <h1 className="text-2xl font-semibold">정보를 불러오지 못했습니다</h1>
-      <p className="text-neutral-600">잠시 후 다시 시도해 주세요.</p>
-      <button type="button" onClick={() => retry()} className="self-start underline underline-offset-4">
-        다시 시도
-      </button>
-    </>
+    <SiteShell>
+      <section className="flex flex-col items-start gap-5 border-t-2 border-char pt-8" data-error-page>
+        <PageTitle title="정보를 불러오지 못했습니다" />
+        <p className="text-[0.9375rem] text-char-2">잠시 후 다시 시도해 주세요.</p>
+        <button
+          type="button"
+          onClick={() => retry()}
+          className="inline-flex min-h-12 items-center justify-center rounded-[0.25rem] bg-btn px-7 text-[0.9375rem] font-semibold text-white transition-colors hover:bg-btn-hover"
+        >
+          다시 시도
+        </button>
+      </section>
+    </SiteShell>
   );
 }

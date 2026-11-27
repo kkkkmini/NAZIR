@@ -54,12 +54,4 @@ export const nazir: ShowContent = {
   creatives: null,
 };
 
-/** 사업자 정보 — 확정 전(카드사 심사 게시 항목 E-008). */
-export const businessInfo: { label: string; value: string | null }[] = [
-  { label: "상호", value: null },
-  { label: "대표자", value: null },
-  { label: "사업자등록번호", value: null },
-  { label: "통신판매업 신고번호", value: null },
-  { label: "주소", value: null },
-  { label: "고객 문의", value: null },
-];
+// 사업자 정보는 src/components/site/business-info.ts(BUSINESS_INFO) 하나만 쓴다(통합 2단계).

@@ -9,13 +9,13 @@
 | 영역 | 브랜치 | 기준 커밋 | 상태 |
 |---|---|---|---|
 | main | main | e43d74a | Step 2 기준 |
-| 프론트·백엔드 통합 | claude/nazir-integration | 1e71ef56c7d4058f0fd699a6ef330b0c62e582dd | 프론트 UI + 백엔드 Step 4 통합. Step 5 미반영 |
+| 프론트·백엔드 통합 | claude/nazir-integration | 0ae34c2 (통합 1단계 merge 1e71ef5 + 문서 커밋 3개) | 프론트 UI + 백엔드 Step 4 통합. 통합 2단계(공통 셸·정책 경로) 로컬 미커밋. Step 5 미반영 |
 | 최신 백엔드 | claude/pensive-allen-5djvof | 8b27bb345b86d0bba90da46c7ee9f8328ba6588f | Step 5 주문 생애주기 구현 완료 보고 |
 | 프론트 디자인·예매 UI 원본 | claude/amazing-noether-2z1zrh | 6d8ea32 | 통합 브랜치에 반영된 프론트 기준점 |
 
 **중요:** 위 커밋은 서로 다른 브랜치의 기준점이다. 통합된 하나의 코드 상태로 간주하지 않는다. 특히 Step 5는 백엔드 브랜치에 있고 통합 브랜치에는 아직 없다.
 
-- 통합 브랜치 기준 커밋 1e71ef5는 GitHub에서 확인했다.
+- 통합 브랜치 기준 커밋 1e71ef5는 GitHub에서 확인했다. 2026-11-27 문서 커밋 3개(23ef982·e87bfb6·0ae34c2)를 로컬에 fast-forward로 반영해 로컬·원격 HEAD가 0ae34c2로 일치한다.
 - 백엔드 Step 5 커밋 8b27bb3의 커밋 객체와 문서는 확인했다. 해당 브랜치의 HEAD가 이 커밋이라는 점은 2026-11-26 백엔드 복원 보고서 기준이며, 이 문서 작성 시점에 ref HEAD를 별도로 재조회한 것은 아니다.
 - main은 별도 승인 없이 변경하지 않는다.
 
@@ -85,13 +85,20 @@ Step 3~5의 “구현 완료”는 코드·테스트 보고 기준이며, 운영
 
 통합 브랜치에는 프론트 UI와 Step 4 백엔드가 반영되어 있다. 백엔드 Step 5는 별도 브랜치에 존재한다.
 
+**통합 2단계(공통 셸·정책 경로, 2026-11-27, 로컬 미커밋 16개 파일):**
+- 정책 경로를 백엔드 라우트(`/terms`·`/privacy`·`/refund-policy`·`/business-info`)로 통일. `/policies/{terms,privacy,refund}`는 삭제하고 `next.config.ts`에서 307 리다이렉트. `/policies/support`(고객 문의)는 대응 백엔드 화면이 없어 유지.
+- 공통 셸 `src/components/site/site-shell.tsx`(프론트 헤더·푸터, 화이트). 백엔드 `SiteChrome.tsx` 삭제, 정책·사업자 정보·404·오류 화면을 셸 안에 표시. 사업자 정보 원본은 `src/components/site/business-info.ts` 하나.
+- 예매 화면 UI 변경 없음(A3-4 환불 규정 링크 주소만 변경).
+- 검증(2026-11-27, 이 세션에서 실행, 로컬 컨테이너): `npm run check`(lint 오류 0·경고 1 기존, typecheck, unit 425 passed), `test:db` 506 passed(로컬 격리 PostgreSQL `nazir_test`), `build`, `check:bundle` 통과. 로컬 서버 브라우저 E2E: 예매·조회 흐름 18단계(데스크톱·모바일), 정책·404·오류 화면, 리다이렉트, staging 모드에서 [DEV]·Mock API 미노출. Preview·실환경 검증 아님.
+- 커밋·push는 사용자 승인 대기.
+
 통합 시에는 코드만 cherry-pick/merge하지 말고 다음을 함께 대조한다.
 - DB migrations 및 Prisma schema
 - 주문·좌석·Hold 서비스와 트랜잭션 헬퍼
 - API 경로·요청/응답 계약과 프론트 adapter/loader
 - 환경변수·Provider 설정
 - 테스트 및 문서
-- 좌석 배치도·Site shell·정책 페이지 등 중복 구현
+- 좌석 배치도 등 중복 구현(Site shell·정책 페이지 중복은 통합 2단계에서 정리, 미커밋)
 
 통합 전에는 Step 5를 통합 브랜치에 이미 반영했다고 말하지 않는다. main 병합·rebase·force push는 별도 사용자 승인 없이 수행하지 않는다.
 

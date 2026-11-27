@@ -304,7 +304,7 @@ export function OrderCheckout({
                 <li>· 결제 결과를 확인하는 동안에는 다시 결제하지 마세요.</li>
                 <li>
                   ·{" "}
-                  <Link href="/policies/refund" className="underline underline-offset-4 hover:text-char">
+                  <Link href="/refund-policy" className="underline underline-offset-4 hover:text-char">
                     취소·환불 규정
                   </Link>
                 </li>

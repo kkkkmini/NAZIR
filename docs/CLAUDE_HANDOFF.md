@@ -33,11 +33,11 @@ NAZIR은 뮤지컬 〈나지르〉 티켓 예매 웹사이트다. 사용자는 �
 | 영역 | 브랜치 | 기준점 | 상태 |
 |---|---|---|---|
 | main | main | e43d74a | Step 2 기준 |
-| 프론트·백엔드 통합 | claude/nazir-integration | 1e71ef56c7d4058f0fd699a6ef330b0c62e582dd | 프론트 UI + Step 4, Step 5 미반영 |
+| 프론트·백엔드 통합 | claude/nazir-integration | 0ae34c2 | 프론트 UI + Step 4. 통합 2단계(공통 셸·정책 경로) 로컬 미커밋, Step 5 미반영 |
 | 최신 백엔드 | claude/pensive-allen-5djvof | 8b27bb345b86d0bba90da46c7ee9f8328ba6588f | Step 5 완료 보고 |
 | 프론트 원본 | claude/amazing-noether-2z1zrh | 6d8ea32 | 프론트 UI 기준 |
 
-백엔드 Step 5는 통합 브랜치에 아직 병합되지 않았다. Step 6 결제는 미착수다. 이 문서의 SHA를 작업 시작 시점의 최신 HEAD라고 가정하지 말고 GitHub에서 다시 확인한다. 위 브랜치 간 통합·병합 상태는 CURRENT_STATE.md를 기준으로 한다.
+통합 2단계(공통 셸·정책 경로 통일, 16개 파일)는 검증을 마쳤으나 커밋·push 승인 대기 중이다(내용: CURRENT_STATE.md §6). 다음 통합 작업은 Step 5 병합 사전 검토다. 백엔드 Step 5는 통합 브랜치에 아직 병합되지 않았다. Step 6 결제는 미착수다. 이 문서의 SHA를 작업 시작 시점의 최신 HEAD라고 가정하지 말고 GitHub에서 다시 확인한다. 위 브랜치 간 통합·병합 상태는 CURRENT_STATE.md를 기준으로 한다.
 
 ## 4. 사용자 확정 정책 [확정]
 

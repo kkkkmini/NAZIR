@@ -1,20 +1,22 @@
 import Link from "next/link";
-import { businessInfo } from "@/content/nazir";
+import { BUSINESS_INFO } from "./business-info";
 
 const policyLinks = [
-  { href: "/policies/terms", label: "이용약관" },
-  { href: "/policies/privacy", label: "개인정보처리방침" },
-  { href: "/policies/refund", label: "취소·환불 규정" },
+  { href: "/terms", label: "이용약관" },
+  { href: "/privacy", label: "개인정보처리방침" },
+  { href: "/refund-policy", label: "취소·환불 규정" },
+  { href: "/business-info", label: "사업자 정보" },
   { href: "/policies/support", label: "고객 문의 안내" },
 ];
 
 /**
- * 관객 사이트 공통 푸터 (IA 4.3). 정책 내용·사업자 정보는 미확정(E-005, E-008, U4).
+ * 관객 사이트 공통 푸터 (IA 4.3). 정책 경로는 백엔드 라우트(/terms 등), 사업자 정보는 business-info.ts 하나만 쓴다.
+ * 정책 내용·사업자 정보는 미확정(E-005, E-008, U4).
  * tone="light"는 A안(화이트 미니멀), 기본 dark는 아직 다크인 임시 안내 페이지용.
  */
 export function SiteFooter({ tone = "dark" }: { tone?: "dark" | "light" }) {
-  const pending = businessInfo.filter((b) => !b.value).map((b) => b.label);
-  const known = businessInfo.filter((b) => b.value);
+  const pending = BUSINESS_INFO.filter((b) => !b.value).map((b) => b.label);
+  const known = BUSINESS_INFO.filter((b) => b.value);
   const light = tone === "light";
   return (
     <footer className={light ? "border-t border-rule bg-wash text-char" : "border-t border-line bg-deep text-ink"}>
@@ -27,7 +29,7 @@ export function SiteFooter({ tone = "dark" }: { tone?: "dark" | "light" }) {
                 <li key={l.href}>
                   <Link
                     href={l.href}
-                    className={"underline-offset-4 hover:underline" + (light && l.href === "/policies/privacy" ? " font-semibold text-char" : "")}
+                    className={"underline-offset-4 hover:underline" + (light && l.href === "/privacy" ? " font-semibold text-char" : "")}
                   >
                     {l.label}
                   </Link>
