@@ -18,6 +18,7 @@ NAZIR은 뮤지컬/연극 티켓 예매 웹사이트다. 사용자는 기획과 
 5. `IMPLEMENTATION_PLAN.md`
 6. `TEST_PLAN.md`
 7. `PROVIDERS.md` — 토스페이먼츠·NICE아이디 공식 근거와 확인 수준([원문]/[검색]/[미확인])
+7a. `NFR.md` — 비기능 요구사항(규모·SLO·과부하 동작·부하/스파이크/스트레스 시나리오). 초안, [권장] 값은 승인 전
 8. 본 문서 `CLAUDE_HANDOFF.md`
 
 v1.0·v1.1 원문은 `docs/archive/v1.0/`, `docs/archive/v1.1/`에 보존되어 있으며 참고용이다(구현 기준 아님).

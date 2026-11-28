@@ -461,9 +461,11 @@ v1.0의 SEAT-05(A→B 변경), SEAT-06(A→B 실패), SEAT-07(A→B→A)은 좌�
 
 | ID | 시나리오 | 기대 결과 |
 |---|---|---|
-| LOAD-01 | 예상 최대 동시 접속(값은 사용자 결정)에서 좌석 조회 | 응답 시간 목표 충족 |
+| LOAD-01 | 예상 최대 동시 접속(**100명**, 2026-11-28 확정)에서 좌석 조회 | 응답 시간 목표 충족(`NFR.md` NFR-P1) |
 | LOAD-02 | 인기 회차 오픈 시 동시 주문 경합 | 불변식 유지, 커넥션 고갈 없음 |
 | LOAD-03 | PG mock 지연 상황의 결제 확인 | 트랜잭션 장기 점유 없음 |
+
+규모 가정·사용자 행동 모델·SLO·과부하 동작과 상세 시나리오(부하·스파이크·스트레스·지속·복원력, 실행 환경과 시점)는 **`NFR.md`가 정본**이다. LOAD-01은 NFR-LOAD-01·NFR-SPIKE-01, LOAD-02는 NFR-SPIKE-01·NFR-RES-03, LOAD-03은 NFR-RES-01로 구체화한다. 부하는 토스·NICE sandbox에 걸지 않고 지연을 주입한 Mock provider로 수행한다(`NFR.md` §7.1).
 
 ## 15. Go / No-Go
 
@@ -536,3 +538,4 @@ NICE는 무료 테스트 건수가 없으므로(원문) NIC-01~04는 Mock, NIC-0
 | 1.2.5 | 2026-11-18 | MIG-19 보강: 미승인 결제의 `method_type` = 요청값(CHECK `payments_unapproved_method_matches_request_ck`), `ledger-claims.test.ts` 35→74개, 뮤테이션 M1~M6 결과(§2.1.1). 기존 시나리오 정의는 변경 없음 |
 | 1.2.6 | 2026-11-18 | MIG-22(승인 증거 불변)·MIG-23(환불 핵심 불변·`SEAT` 합계)·MIG-24(Prisma CLI 환경 가드) 신설, 테스트 파일 `ledger-evidence.test.ts`·`cli-guard.test.ts`·`prisma-cli-guard.test.ts` 대응, 뮤테이션 시험(§2.1.2), SEED-03 대상 DB 조정·SEED-03b 추가, 기존 시나리오 정의 변경 1건(S3 `SUCCEEDED` 강등은 이제 문장 시점에 거부). |
 | 1.2.7 | 2026-11-18 | MIG-24 보강: `SHADOW_DATABASE_URL` 환경 규칙·주 DB와 같은 DB 거부·미설정 시 기존 동작·거부 시 Shadow DB 불변(sentinel), `cli-guard.test.ts` 20→32개·`prisma-cli-guard.test.ts` 16→38개, 뮤테이션 SH1~SH12(§2.1.2). 기존 단언 변경 1건: "Shadow는 검사하지 않고 그대로 전달"을 새 요구에 맞게 교체. |
+| 1.2.8 | 2026-11-28 | §14: 동시 접속 100명 확정 반영, 상세 부하·스파이크·스트레스 시나리오를 신설 문서 `NFR.md`로 위임. 기존 시나리오 정의는 변경 없음 |
