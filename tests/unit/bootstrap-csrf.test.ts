@@ -110,9 +110,45 @@ describe("CSRF token and HMAC", () => {
     const t = issueCsrfToken(r, VALID_BIND);
     expect(verifyCsrfToken(r, VALID_BIND, t)).toBe(true);
     expect(verifyCsrfToken(r, randomBytes(32).toString("base64url"), t)).toBe(false);
-    const flipped = t.slice(0, -1) + (t.endsWith("A") ? "B" : "A");
-    expect(verifyCsrfToken(r, VALID_BIND, flipped)).toBe(false);
+    // Tamper the FIRST MAC character: all 6 of its bits are significant, so the decoded MAC always changes.
+    // (The former "replace the last character" variant was flaky: that character has 2 unused bits — see BOOT-05b.)
+    const i = t.indexOf(".") + 1;
+    const tampered = t.slice(0, i) + (t[i] === "A" ? "B" : "A") + t.slice(i + 1);
+    expect(Buffer.from(tampered.slice(i), "base64url").equals(Buffer.from(t.slice(i), "base64url"))).toBe(false);
+    expect(verifyCsrfToken(r, VALID_BIND, tampered)).toBe(false);
     for (const bad of [undefined, null, "", "v1.", "v1.short", t + "x", 42]) expect(verifyCsrfToken(r, VALID_BIND, bad)).toBe(false);
+  });
+
+  /** base64url alphabet in value order; a canonical last character of a 32-byte value has its 2 low bits = 0. */
+  const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  /** The 3 other spellings of the last character that decode to the SAME 32 bytes. */
+  const nonCanonicalVariants = (t: string) => {
+    const v = B64URL.indexOf(t[t.length - 1]);
+    return [1, 2, 3].map((d) => t.slice(0, -1) + B64URL[v + d]);
+  };
+
+  it("BOOT-05b a non-canonical spelling of a valid token (same MAC bytes, different last character) is rejected", () => {
+    const r = security().csrfKeys;
+    const t = issueCsrfToken(r, VALID_BIND);
+    expect(B64URL.indexOf(t[t.length - 1]) % 4).toBe(0); // signVersioned emits the canonical form
+    for (const variant of nonCanonicalVariants(t)) {
+      expect(variant).not.toBe(t);
+      expect(Buffer.from(variant.slice(3), "base64url").equals(Buffer.from(t.slice(3), "base64url"))).toBe(true);
+      expect(verifyCsrfToken(r, VALID_BIND, variant)).toBe(false);
+    }
+    expect(verifyCsrfToken(r, VALID_BIND, t)).toBe(true);
+  });
+
+  it("BOOT-05c repeated with 500 random keys and bindings: every canonical token verifies, every variant and tamper fails", () => {
+    for (let n = 0; n < 500; n++) {
+      const r = ring({ NAZIR_CSRF_KEYS: `v1:${k()}`, NAZIR_CSRF_KEY_CURRENT: "v1" });
+      const bind = randomBytes(32).toString("base64url");
+      const t = issueCsrfToken(r, bind);
+      expect(verifyCsrfToken(r, bind, t)).toBe(true);
+      for (const variant of nonCanonicalVariants(t)) expect(verifyCsrfToken(r, bind, variant)).toBe(false);
+      const i = t.indexOf(".") + 1;
+      expect(verifyCsrfToken(r, bind, t.slice(0, i) + (t[i] === "A" ? "B" : "A") + t.slice(i + 1))).toBe(false);
+    }
   });
 
   it("BOOT-06 HMAC is domain separated by purpose", () => {

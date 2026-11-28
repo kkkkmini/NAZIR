@@ -20,7 +20,15 @@ export function signVersioned(ring: Keyring, purpose: string, message: string): 
 
 const TOKEN = /^(v[1-9][0-9]{0,3})\.([A-Za-z0-9_-]{43})$/;
 
-/** Constant-time check; false for malformed input, unknown version or mismatch (never throws on input). */
+/**
+ * Constant-time check; false for malformed input, unknown version or mismatch (never throws on input).
+ *
+ * Only the canonical encoding is accepted. A 32-byte MAC is 43 base64url characters and the last character carries
+ * 2 unused bits, so up to 4 different strings decode to the same bytes (`Buffer.from` ignores those bits). Without
+ * this check a token with a changed last character could still verify (token malleability — the MAC bytes are the
+ * same, so it is not a forgery). signVersioned always emits the canonical form, so valid tokens are unaffected.
+ * The comparison is on the attacker-supplied string only (no secret involved), so it is not timing-sensitive.
+ */
 export function verifyVersioned(ring: Keyring, purpose: string, message: string, token: unknown): boolean {
   if (typeof token !== "string") return false;
   const m = TOKEN.exec(token);
@@ -28,6 +36,7 @@ export function verifyVersioned(ring: Keyring, purpose: string, message: string,
   const key = ring.keys.get(m[1]);
   if (!key) return false;
   const given = Buffer.from(m[2], "base64url");
+  if (given.toString("base64url") !== m[2]) return false;
   const expected = mac(key, purpose, message);
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
