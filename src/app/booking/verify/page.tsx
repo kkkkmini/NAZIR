@@ -37,7 +37,7 @@ async function VerifyLoader() {
   return (
     <div className="flex flex-col gap-6 md:gap-9">
       {mode === "dev-preview" && <DevNote>개발용 미리보기입니다. 실제 본인인증을 하지 않으며 예매 인증 세션도 발급되지 않습니다.</DevNote>}
-      <VerifyStart mode={mode} showTitle={nazir.title} sessions={sessions.kind === "dev-fixture" ? sessions.sessions : null} />
+      <VerifyStart mode={mode} showTitle={nazir.title} sessions={sessions.kind === "not-connected" ? null : sessions.sessions} />
     </div>
   );
 }

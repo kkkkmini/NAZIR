@@ -45,7 +45,7 @@ async function CompleteLoader({ searchParams }: { searchParams: PageProps<"/iden
         result={result}
         claimPurpose={purpose}
         showTitle={nazir.title}
-        sessions={sessions.kind === "dev-fixture" ? sessions.sessions : null}
+        sessions={sessions.kind === "not-connected" ? null : sessions.sessions}
       />
     );
   }

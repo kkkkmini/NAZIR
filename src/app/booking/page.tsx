@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { BookingStepHeader } from "@/components/booking/booking-step-header";
 import { SessionPicker } from "@/components/booking/session-picker";
+import { DevNote } from "@/components/site/dev-note";
 import { nazir } from "@/content/nazir";
 import { getBookingSessions } from "@/server/booking/get-booking-sessions";
 
@@ -11,8 +12,8 @@ export const metadata: Metadata = { title: "회차 선택 | 뮤지컬 〈나지�
 /**
  * A3-1 회차 선택 (docs/design/01_IA.md §4.1, 02_USER_FLOW.md 1.1) — A안 화이트 미니멀.
  * - 조회만 한다. 좌석 점유·주문 생성·본인인증은 이 화면에서 하지 않는다.
- * - 운영 환경: 회차 API 연결 전이므로 "회차 정보 준비 중".
- * - local/test: [DEV] 가짜 회차 데이터로 화면 상태를 확인한다.
+ * - 데이터 출처는 src/server/catalog/catalog-source.ts: 운영은 DB(공개 카탈로그), local/test는 기본 [DEV] 가짜 회차
+ *   (NAZIR_CATALOG_SOURCE=db이면 테스트 DB). 출처가 없으면 "회차 정보 준비 중".
  */
 export default function BookingSessionsPage() {
   return (
@@ -57,6 +58,14 @@ async function SessionsLoader() {
     );
   }
 
+  if (result.kind === "live") {
+    return (
+      <div className="flex flex-col gap-6 md:gap-9">
+        {result.testData && <DevNote>테스트 DB의 회차 데이터입니다(local/test). 실제 공연 일정이 아닐 수 있으며 운영 데이터와 분리되어 있습니다.</DevNote>}
+        <SessionPicker sessions={result.sessions} dev={false} showTitle={`뮤지컬 ${nazir.title}`} />
+      </div>
+    );
+  }
   return (
     <div className="flex flex-col gap-6 md:gap-9">
       <p className="flex gap-2 border-l-2 border-char-3 bg-wash px-3.5 py-2 text-xs md:py-2.5 md:text-[0.8125rem] leading-relaxed text-char-2">

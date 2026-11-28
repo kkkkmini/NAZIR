@@ -14,6 +14,8 @@ import { useSeatSelection } from "./use-seat-selection";
  * - 점유 성공·실패는 서버 응답으로만 정한다. 성공 응답(holdId)을 받은 뒤에만 A3-4로 이동한다.
  * - 실패 시 어떤 좌석도 점유되지 않는다(원자적). 실패 좌석을 안내하고, 서버가 최신 좌석 상태를 다시 내려주며,
  *   선택은 모두 비워 사용자가 다시 고르게 한다.
+ * - readOnly(실제 공개 좌석, Step 5 연결 전): 좌석 상태·가격 조회만. 선택·확보 요청을 하지 않고, 구매 한도(quota)를
+ *   추측하지 않는다. seatLimit은 회차의 1인 최대 좌석 수(서버 값)만 표시한다.
  */
 
 type Notice = { tone: "error" | "info"; title: string; body?: string; failedLabels?: string[]; action?: { href: string; label: string } };
@@ -26,23 +28,20 @@ const SIM_LABEL: Record<HoldSimulation, string> = {
   "identity-time": "인증 남은 시간 10분 미만",
 };
 
-export function SeatPicker({
-  sessionId,
-  sessionStartsAt,
-  showTitle,
-  seats,
-  quota,
-  dev,
-}: {
+type SeatPickerProps = {
   sessionId: string;
   sessionStartsAt: string;
   showTitle: string;
   seats: SeatView[];
-  quota: QuotaView;
   dev: boolean;
-}) {
+} & ({ readOnly?: false; quota: QuotaView } | { readOnly: true; quota: null; seatLimit: number });
+
+export function SeatPicker(props: SeatPickerProps) {
+  const { sessionId, sessionStartsAt, showTitle, seats, dev, readOnly, quota } = props;
   const router = useRouter();
-  const { selected, selectedIds, displayTotal, toggle, clear } = useSeatSelection(seats, quota.remaining);
+  const seatLimit = props.readOnly ? props.seatLimit : props.quota.seatLimit;
+  const remaining = props.readOnly ? 0 : props.quota.remaining;
+  const { selected, selectedIds, displayTotal, toggle, clear } = useSeatSelection(seats, remaining);
   const [failedIds, setFailedIds] = useState<ReadonlySet<string>>(new Set());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [sim, setSim] = useState<HoldSimulation>("auto");
@@ -68,14 +67,14 @@ export function SeatPicker({
   function onToggle(seat: SeatView) {
     const r = toggle(seat);
     if (r === "limit") {
-      setNotice({ tone: "info", title: `이 회차에서는 최대 ${quota.remaining}석까지 선택할 수 있습니다.`, body: "1인 최대 4석 기준은 본인인증 정보로 적용됩니다." });
+      setNotice({ tone: "info", title: `이 회차에서는 최대 ${remaining}석까지 선택할 수 있습니다.`, body: "1인 최대 4석 기준은 본인인증 정보로 적용됩니다." });
     } else if (notice?.tone === "info") {
       setNotice(null);
     }
   }
 
   function submit() {
-    if (selected.length === 0 || pending) return;
+    if (readOnly || selected.length === 0 || pending) return;
     const ids = selected.map((s) => s.sessionSeatId);
     const labels = new Map(seats.map((s) => [s.sessionSeatId, s.label]));
     setNotice(null);
@@ -92,22 +91,41 @@ export function SeatPicker({
     });
   }
 
-  const noQuota = quota.remaining <= 0;
+  const noQuota = remaining <= 0;
   const when = fullFmt.format(new Date(sessionStartsAt));
   const summaryLine =
     selected.length === 0 ? "" : selected.length === 1 ? selected[0].label : `${selected[0].label} 외 ${selected.length - 1}석`;
   // 사전 안내(서버 판단은 그대로): 진행 중 주문이 있거나, 더 고를 수 있는 좌석이 없을 때
-  const preNotice: Notice | null = quota.activeOrderId
+  const preNotice: Notice | null = readOnly
+    ? {
+        tone: "info",
+        title: "지금은 좌석 조회만 가능합니다.",
+        body: "실제 예매(좌석 확보)는 아직 지원되지 않습니다. 좌석 상태와 가격만 확인할 수 있습니다.",
+      }
+    : quota?.activeOrderId
     ? {
         tone: "info",
         title: "이 회차에 진행 중인 예매가 있습니다.",
-        action: { href: `/booking/order?hold=${encodeURIComponent(quota.activeOrderId)}`, label: "진행 중인 예매 보기" },
+        action: { href: `/booking/order?hold=${encodeURIComponent(quota!.activeOrderId!)}`, label: "진행 중인 예매 보기" },
       }
     : noQuota
       ? { tone: "info", title: "이 회차에서 더 선택할 수 있는 좌석이 없습니다.", body: "1인 최대 4석 기준은 본인인증 정보로 적용됩니다." }
       : null;
 
-  const holdButton = (size: "lg" | "sm") => (
+  const holdButton = (size: "lg" | "sm") =>
+    readOnly ? (
+      <button
+        type="button"
+        disabled
+        data-action="hold-unavailable"
+        className={
+          "shrink-0 cursor-not-allowed rounded-[0.25rem] bg-wash font-semibold text-char-3 " +
+          (size === "lg" ? "min-h-[3.25rem] w-full px-6 text-base" : "min-h-12 px-6 text-[0.9375rem]")
+        }
+      >
+        예매 준비 중
+      </button>
+    ) : (
     <button
       type="button"
       onClick={submit}
@@ -122,7 +140,7 @@ export function SeatPicker({
       {pending ? "좌석 확보 중…" : "좌석 확보"}
       {dev && !pending && <span className="ml-2 rounded-sm bg-white/15 px-1.5 py-0.5 text-[0.6rem] font-semibold tracking-wider">DEV</span>}
     </button>
-  );
+    );
 
   return (
     <div className="pb-[calc(8rem+env(safe-area-inset-bottom,0px))] lg:pb-0">
@@ -141,7 +159,13 @@ export function SeatPicker({
               </Link>
             </div>
             <p className="text-[0.8125rem] text-char-3">
-              1인 최대 {quota.seatLimit}석 · 이 회차에서 <strong className="font-semibold text-char">{quota.remaining}석</strong>까지 선택할 수 있습니다
+              {readOnly ? (
+                <>1인 최대 {seatLimit}석 · 지금은 좌석 조회만 가능합니다</>
+              ) : (
+                <>
+                  1인 최대 {seatLimit}석 · 이 회차에서 <strong className="font-semibold text-char">{remaining}석</strong>까지 선택할 수 있습니다
+                </>
+              )}
             </p>
           </div>
 
@@ -179,7 +203,13 @@ export function SeatPicker({
             <div className="flex items-baseline justify-between">
               <h2 className="text-base font-bold text-char">선택 좌석</h2>
               <p className="text-[0.8125rem] tabular-nums text-char-3" data-selected-count>
-                <strong className="font-semibold text-char">{selected.length}</strong> / 최대 {quota.remaining}석
+                {readOnly ? (
+                  "조회 전용"
+                ) : (
+                  <>
+                    <strong className="font-semibold text-char">{selected.length}</strong> / 최대 {remaining}석
+                  </>
+                )}
               </p>
             </div>
             <p className="text-[0.8125rem] text-char-2">
@@ -187,7 +217,7 @@ export function SeatPicker({
             </p>
             <div className="border-y border-rule">
               {selected.length === 0 ? (
-                <p className="py-6 text-center text-sm text-char-3">좌석을 선택해 주세요.</p>
+                <p className="py-6 text-center text-sm text-char-3">{readOnly ? "지금은 좌석 조회만 가능합니다." : "좌석을 선택해 주세요."}</p>
               ) : (
                 <ul className="flex flex-col py-1.5 text-[0.9375rem]" data-selected-list>
                   {selected.map((s) => (
@@ -199,6 +229,7 @@ export function SeatPicker({
                 </ul>
               )}
             </div>
+            {!readOnly && (
             <p className="flex items-baseline justify-between tabular-nums">
               <span className="text-sm text-char-2">총 금액</span>
               <span className="flex items-baseline gap-1.5">
@@ -208,6 +239,7 @@ export function SeatPicker({
                 {dev && <span className="text-[0.625rem] font-semibold text-char-3">[DEV]</span>}
               </span>
             </p>
+            )}
             {holdButton("lg")}
             <ul className="flex flex-col gap-1 text-[0.8125rem] leading-relaxed text-char-3">
               <li>· 좌석 확보를 누르면 선택한 좌석 전체를 7분간 확보합니다.</li>

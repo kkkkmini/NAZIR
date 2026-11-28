@@ -33,6 +33,11 @@ export type QuotaView = {
 export type SeatMapResult =
   | { kind: "not-ready" }
   | { kind: "invalid-session" }
+  /**
+   * 실제 공개 좌석(Step 3, 읽기 전용). 구매 한도(my-quota)와 좌석 확보(Step 5)가 연결되지 않았으므로 quota가 없다.
+   * seatLimit은 회차의 maxSeatsPerIdentity(서버 값)이며 남은 구매 가능 수가 아니다.
+   */
+  | { kind: "live-readonly"; sessionId: string; sessionStartsAt: string; seats: SeatView[]; seatLimit: number; testData: boolean }
   | { kind: "dev-fixture"; sessionId: string; sessionStartsAt: string; seats: SeatView[]; quota: QuotaView };
 
 /** [DEV] 점유 응답 미리보기 선택값. "auto"는 개발용 좌석 상태 그대로 판단한다. */

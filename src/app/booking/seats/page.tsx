@@ -6,6 +6,8 @@ import { SeatPicker } from "@/components/seats/seat-picker";
 import { SessionRedirect } from "@/components/seats/session-redirect";
 import { DevNote } from "@/components/site/dev-note";
 import { nazir } from "@/content/nazir";
+import { connection } from "next/server";
+import { catalogSource } from "@/server/catalog/catalog-source";
 import { getSeatMap } from "@/server/seats/get-seat-map";
 
 export const metadata: Metadata = { title: "좌석 선택 | 뮤지컬 〈나지르〉 | NAZIR" };
@@ -24,7 +26,9 @@ export default function SeatsPage(props: PageProps<"/booking/seats">) {
         <div className="mx-auto flex max-w-[77.5rem] flex-col gap-5 px-5 py-6 sm:px-8 md:gap-9 md:py-12">
           <div className="flex flex-col gap-1.5">
             <h1 className="text-[1.375rem] font-bold tracking-[-0.03em] text-char md:text-[1.75rem]">좌석 선택</h1>
-            <p className="text-sm text-char-2">원하는 좌석을 선택한 뒤 좌석 확보를 눌러 주세요.</p>
+            <Suspense fallback={<p className="text-sm text-char-2">&nbsp;</p>}>
+              <SeatsSubtitle />
+            </Suspense>
           </div>
           <Suspense fallback={<div className="h-96 animate-pulse bg-wash motion-reduce:animate-none" />}>
             <SeatsLoader searchParams={props.searchParams} />
@@ -33,6 +37,13 @@ export default function SeatsPage(props: PageProps<"/booking/seats">) {
       </main>
     </div>
   );
+}
+
+/** 부제: 실제 공개 좌석(조회 전용)이면 조회 안내, 개발용 확보 시뮬레이션이면 기존 문구. 출처 규칙은 catalog-source.ts. */
+async function SeatsSubtitle() {
+  await connection();
+  const readOnly = catalogSource().kind === "db";
+  return <p className="text-sm text-char-2">{readOnly ? "좌석 배치와 판매 상태를 확인할 수 있습니다." : "원하는 좌석을 선택한 뒤 좌석 확보를 눌러 주세요."}</p>;
 }
 
 async function SeatsLoader({ searchParams }: { searchParams: PageProps<"/booking/seats">["searchParams"] }) {
@@ -57,6 +68,25 @@ async function SeatsLoader({ searchParams }: { searchParams: PageProps<"/booking
           회차 다시 선택
         </Link>
       </Panel>
+    );
+  }
+
+  if (map.kind === "live-readonly") {
+    return (
+      <div className="flex flex-col gap-6 md:gap-9">
+        {map.testData && <DevNote>테스트 DB의 좌석 데이터입니다(local/test). 좌석 조회만 가능하며 좌석 확보·예매는 아직 연결되지 않았습니다.</DevNote>}
+        <SeatPicker
+          key={map.sessionId}
+          sessionId={map.sessionId}
+          sessionStartsAt={map.sessionStartsAt}
+          showTitle={`뮤지컬 ${nazir.title}`}
+          seats={map.seats}
+          readOnly
+          quota={null}
+          seatLimit={map.seatLimit}
+          dev={false}
+        />
+      </div>
     );
   }
 

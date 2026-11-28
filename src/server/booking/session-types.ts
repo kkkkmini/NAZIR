@@ -22,4 +22,6 @@ export interface BookingSessionView {
 
 export type BookingSessionsResult =
   | { kind: "not-connected" }
-  | { kind: "dev-fixture"; showTitle: string; sessions: BookingSessionView[] };
+  | { kind: "dev-fixture"; showTitle: string; sessions: BookingSessionView[] }
+  /** 실제 공개 카탈로그(DB). 공연 ID는 이후 단계(A3-3)에서 같은 규칙으로 다시 결정한다. */
+  | { kind: "live"; showId: string; showSlug: string; showTitle: string; sessions: BookingSessionView[]; testData: boolean };
